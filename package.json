@@ -1,0 +1,58 @@
+{
+  "name": "google-ads-auto-link-replacement",
+  "version": "1.0.0",
+  "description": "Google Ads 联盟链接自动更换系统",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 10111",
+    "build": "next build",
+    "start": "next start -p 10111",
+    "lint": "next lint",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:studio": "prisma studio",
+    "db:reset": "prisma migrate reset",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.7.1",
+    "antd": "^5.12.2",
+    "axios": "^1.6.2",
+    "bcryptjs": "^2.4.3",
+    "dayjs": "^1.11.10",
+    "google-ads-api": "^17.0.0",
+    "google-auth-library": "^9.0.0",
+    "https-proxy-agent": "^7.0.6",
+    "next": "^14.0.4",
+    "next-auth": "^4.24.5",
+    "node-cron": "^3.0.3",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "undici": "^7.16.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^20.10.5",
+    "@types/node-cron": "^3.0.11",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^8.56.0",
+    "eslint-config-next": "^14.0.4",
+    "postcss": "^8.4.32",
+    "prisma": "^5.7.1",
+    "tailwindcss": "^3.4.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}

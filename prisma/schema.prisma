@@ -1,0 +1,369 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "mysql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+  relationMode      = "prisma"
+}
+
+model User {
+  id               String         @id @default(uuid())
+  /// 用户邮箱，用于登录
+  email            String         @unique
+  /// 加密后的密码
+  password         String
+  /// 用户姓名
+  name             String         @db.VarChar(100)
+  /// 角色：employee=员工，admin=管理员
+  role             UserRole       @default(employee)
+  /// 租户ID，用于多租户数据隔离
+  tenantId         String
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  mccAccounts      MccAccount[]
+  cidAccounts      CidAccount[]
+  campaigns        Campaign[]
+  monitoringLogs   MonitoringLog[]
+  systemConfigLogs SystemConfig[]
+
+  @@index([tenantId])
+  @@map("User")
+}
+
+model MccAccount {
+  id             String       @id @default(uuid())
+  /// 关联的用户ID
+  userId         String
+  /// Google Ads MCC账号ID
+  mccId          String       @db.VarChar(100)
+  /// MCC账号显示名称
+  name           String       @db.VarChar(200)
+  /// 授权状态
+  authStatus     AuthStatus   @default(pending)
+  /// Google OAuth刷新令牌（加密存储）
+  refreshToken   String?      @db.Text
+  /// Google OAuth访问令牌（临时）
+  accessToken    String?      @db.Text
+  /// 访问令牌过期时间
+  tokenExpiresAt DateTime?
+  /// 最后同步广告系列数据的时间
+  lastSyncAt     DateTime?
+  /// 软删除时间戳，NULL表示未删除
+  deletedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  /// 有效 CID 数量
+  activeCids     Int          @default(0)
+  /// 规避/暂停 CID 数量
+  suspendedCids  Int          @default(0)
+  /// 总 CID 数量
+  totalCids      Int          @default(0)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cidAccounts    CidAccount[]
+
+  @@unique([mccId, userId, deletedAt])
+  @@index([userId])
+  @@index([authStatus])
+  @@map("MccAccount")
+}
+
+model CidAccount {
+  id           String     @id @default(uuid())
+  /// 关联的用户ID
+  userId       String
+  /// 关联的MCC账号ID
+  mccAccountId String
+  /// Google Ads客户账号ID（Customer ID）
+  cid          String     @db.VarChar(100)
+  /// CID账号显示名称
+  name         String     @db.VarChar(200)
+  /// 账号货币代码（如USD、CNY）
+  currency     String?    @db.VarChar(10)
+  /// 账号时区
+  timezone     String?    @db.VarChar(50)
+  /// 账号状态
+  status       CidStatus  @default(active)
+  /// 最后同步广告系列数据的时间
+  lastSyncAt   DateTime?
+  /// 软删除时间戳
+  deletedAt    DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mccAccount   MccAccount @relation(fields: [mccAccountId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+
+  @@unique([cid, mccAccountId, deletedAt])
+  @@index([userId])
+  @@index([mccAccountId])
+  @@index([status])
+  @@map("CidAccount")
+}
+
+model Campaign {
+  id                    String            @id @default(uuid())
+  /// 关联的用户ID
+  userId                String
+  /// 关联的CID账号ID
+  cidAccountId          String
+  /// Google Ads广告系列ID
+  campaignId            String            @db.VarChar(100)
+  /// 广告系列名称
+  name                  String            @db.VarChar(255)
+  /// 投放国家代码（如US、UK、CN）
+  countryCode           String            @db.VarChar(10)
+  /// 上次记录的点击数
+  lastClicks            Int               @default(0)
+  /// 今日点击数
+  todayClicks           Int               @default(0)
+  /// 最后更新的Final URL
+  lastNewUrl            String?           @db.Text
+  /// 来路URL（Referrer）
+  referrer              String?           @db.Text
+  /// 当日已执行的换链次数
+  replacementCountToday Int               @default(0)
+  /// 最后一次换链时间
+  lastReplacementAt     DateTime?
+  /// 是否启用自动监控换链
+  enabled               Boolean           @default(true)
+  /// 软删除时间戳
+  deletedAt             DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cidAccount            CidAccount        @relation(fields: [cidAccountId], references: [id], onDelete: Cascade)
+  affiliateConfigs      AffiliateConfig[]
+  clickManagement       ClickManagement?
+  usedProxyIps          UsedProxyIp[]
+  monitoringLogs        MonitoringLog[]
+
+  @@unique([campaignId, cidAccountId, deletedAt])
+  @@index([userId])
+  @@index([cidAccountId])
+  @@index([enabled, deletedAt])
+  @@map("Campaign")
+}
+
+model ClickManagement {
+  id             String   @id @default(uuid())
+  /// 关联的广告系列ID（一条广告系列一条配置）
+  campaignId     String   @unique
+  /// 是否启用刷点击配置
+  enabled        Boolean  @default(false)
+  /// 订单数（用户输入）
+  orderCount     Int      @default(0)
+  /// 转化率（存为 0~1 小数，例如 0.1 代表 10%）
+  conversionRate Decimal  @db.Decimal(10, 6)
+  /// 待刷点击（按规则生成）
+  pendingClicks  Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([enabled])
+  @@map("ClickManagement")
+}
+
+model AffiliateConfig {
+  id            String    @id @default(uuid())
+  /// 关联的广告系列ID
+  campaignId    String
+  /// 联盟链接URL（起始链接）
+  affiliateLink String    @db.Text
+  /// 目标根域名（用于验证最终落地页）
+  targetDomain  String    @db.VarChar(255)
+  /// 国家代码，用于选择代理IP
+  countryCode   String    @db.VarChar(10)
+  /// 最大允许跳转次数
+  maxRedirects  Int       @default(10)
+  /// 是否启用此联盟配置
+  enabled       Boolean   @default(true)
+  /// 优先级（数字越小优先级越高）
+  priority      Int       @default(0)
+  /// 软删除时间戳
+  deletedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([enabled, priority])
+  @@map("AffiliateConfig")
+}
+
+model ProxyProvider {
+  id             String          @id @default(uuid())
+  /// 供应商名称
+  name           String          @db.VarChar(100)
+  /// 优先级（数字越小优先级越高）
+  priority       Int             @default(0)
+  /// 是否启用
+  enabled        Boolean         @default(true)
+  /// 成功率（百分比）
+  successRate    Decimal?        @db.Decimal(5, 2)
+  /// 最后一次失败时间
+  lastFailedAt   DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  /// 认证密码（加密存储）
+  password       String          @db.Text
+  /// 代理服务器地址
+  proxyHost      String          @db.VarChar(500)
+  /// 代理服务器端口
+  proxyPort      Int             @default(8080)
+  /// 认证用户名（支持国家代码占位符，如：user-country-{country}）
+  username       String          @db.VarChar(200)
+  usedProxyIps   UsedProxyIp[]
+  monitoringLogs MonitoringLog[]
+
+  @@index([enabled, priority])
+  @@map("ProxyProvider")
+}
+
+model UsedProxyIp {
+  id          String        @id @default(uuid())
+  /// 代理IP地址
+  ip          String        @db.VarChar(50)
+  /// 代理端口
+  port        Int
+  /// 代理IP所属国家代码
+  countryCode String        @db.VarChar(10)
+  /// 关联的代理供应商ID
+  providerId  String
+  /// 关联的广告系列ID（按广告系列去重）
+  campaignId  String
+  /// 使用时间（用于24小时清理）
+  usedAt      DateTime      @default(now())
+  provider    ProxyProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  campaign    Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([ip, campaignId, usedAt])
+  @@index([usedAt])
+  @@index([campaignId])
+  @@index([providerId])
+  @@map("UsedProxyIp")
+}
+
+model MonitoringLog {
+  id            String         @id @default(uuid())
+  /// 关联的用户ID（用于数据隔离；批次日志也必须归属到用户）
+  userId        String?
+  /// 关联的广告系列ID（保留用于向后兼容，新日志设为null）
+  campaignId    String?
+  /// 触发监控的时间
+  triggeredAt   DateTime       @default(now())
+  /// 触发时的今日点击数（单条日志用）
+  todayClicks   Int            @default(0)
+  /// 触发时的上次记录点击数（单条日志用）
+  lastClicks    Int            @default(0)
+  /// 新增点击数（单条日志用）
+  newClicks     Int            @default(0)
+  /// 使用的代理IP地址（单条日志用）
+  proxyIp       String?        @db.VarChar(50)
+  /// 使用的代理端口（单条日志用）
+  proxyPort     Int?
+  /// 使用的代理供应商ID（单条日志用）
+  providerId    String?
+  /// 访问的联盟链接（单条日志用）
+  affiliateLink String?        @db.Text
+  /// 最终落地页URL（单条日志用）
+  finalUrl      String?        @db.Text
+  /// 实际跳转次数（单条日志用）
+  redirectCount Int?
+  /// 执行状态
+  status        MonitorStatus
+  /// 失败原因或错误信息
+  errorMessage  String?        @db.Text
+  /// 执行耗时（毫秒）
+  executionTime Int?
+  /// === 批次日志字段 ===
+  /// 是否为批次汇总日志
+  isBatchLog    Boolean        @default(false)
+  /// 处理的广告系列总数
+  processed     Int            @default(0)
+  /// 成功更新数
+  updated       Int            @default(0)
+  /// 跳过数（无新点击）
+  skipped       Int            @default(0)
+  /// 错误数
+  errors        Int            @default(0)
+  /// 详细结果（JSON数组，包含每个广告系列的处理详情）
+  details       Json?
+  /// 监控间隔（分钟，记录当时的配置）
+  intervalMinutes Int?
+  createdAt     DateTime       @default(now())
+  user          User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  campaign      Campaign?      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  provider      ProxyProvider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+
+  @@index([userId, triggeredAt])
+  @@index([campaignId, triggeredAt])
+  @@index([status])
+  @@index([triggeredAt])
+  @@index([providerId])
+  @@index([isBatchLog, triggeredAt])
+  @@map("MonitoringLog")
+}
+
+model SystemConfig {
+  id          String   @id @default(uuid())
+  /// 配置键名
+  key         String   @unique @db.VarChar(100)
+  /// 配置值（JSON或字符串）
+  value       String   @db.Text
+  /// 配置说明
+  description String?  @db.VarChar(500)
+  /// 配置分类
+  category    String   @default("general") @db.VarChar(50)
+  /// 是否对普通用户可见
+  isPublic    Boolean  @default(false)
+  /// 最后更新者用户ID
+  updatedBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  updater     User?    @relation(fields: [updatedBy], references: [id], onDelete: SetNull)
+
+  @@index([category])
+  @@index([updatedBy])
+  @@map("SystemConfig")
+}
+
+enum UserRole {
+  /// 员工：仅查看/操作自己的数据
+  employee
+  /// 管理员：可查看全部租户数据
+  admin
+}
+
+enum AuthStatus {
+  /// 待授权
+  pending
+  /// 已授权
+  authorized
+  /// 已过期
+  expired
+  /// 授权失败
+  failed
+}
+
+enum CidStatus {
+  /// 活跃
+  active
+  /// 未激活
+  inactive
+  /// 已暂停
+  suspended
+}
+
+enum MonitorStatus {
+  /// 成功
+  success
+  /// 失败
+  failed
+  /// 跳过
+  skipped
+}

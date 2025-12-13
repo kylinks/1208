@@ -1,0 +1,13 @@
+-系统的开发框架是Next.js
+-系统的数据库是Prisma ORM
+-系统的UI框架是AntDesign
+-系统的CSS框架是TailwindCSS
+-系统使用的数据库是MySQL
+-系统的数据模型文件位于项目根目录下的：prisma/schema.prisma文件中
+-请遵守next.js的文件目录以及路由规范
+-系统端口是：10111
+-控制台位于：/console
+-已经实现mcc管理模块功能
+-已经实现代理管理模块功能
+-已经实现链接管理模块功能
+-不要主动运行‘npm run db:push’命令，请提示我手动运行

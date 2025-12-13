@@ -1,0 +1,11 @@
+---
+trigger: always_on
+---
+
+-系统的开发框架是Next.js
+-系统的数据库是Prisma ORM
+-系统的UI框架是AntDesign
+-系统的CSS框架是TailwindCSS
+-系统使用的数据库是MySQL
+-系统的数据模型文件位于项目根目录下的：prisma/schema.prisma文件中
+-请遵守next.js的文件目录以及路由规范
