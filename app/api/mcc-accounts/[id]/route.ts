@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic'
+
 // 更新MCC账号
 export async function PUT(
   request: NextRequest,

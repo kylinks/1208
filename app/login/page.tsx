@@ -1,12 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, Suspense } from 'react'
 import { signIn } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Form, Input, Button, Card, message } from 'antd'
+import { Form, Input, Button, Card, message, Spin } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
 
-export default function LoginPage() {
+// 登录表单组件（使用 useSearchParams）
+function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [loading, setLoading] = useState(false)
@@ -103,5 +104,28 @@ export default function LoginPage() {
         </div>
       </Card>
     </div>
+  )
+}
+
+// 加载状态组件
+function LoginLoading() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+      <Card className="w-full max-w-md shadow-2xl">
+        <div className="text-center py-12">
+          <Spin size="large" />
+          <p className="mt-4 text-gray-500">加载中...</p>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// 主页面组件（使用 Suspense 包裹）
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<LoginLoading />}>
+      <LoginForm />
+    </Suspense>
   )
 }

@@ -11,6 +11,9 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { getGoogleAdsService } from '@/lib/googleAdsService';
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic';
+
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ success: false, error: message }, { status })
 }

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { validateMccAndGetAccounts } from '@/lib/google-ads-client'
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic'
+
 /**
  * 验证MCC账号并获取子账号信息
  * POST /api/mcc-accounts/validate

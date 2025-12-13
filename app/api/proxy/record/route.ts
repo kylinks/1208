@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { recordProxyUsage } from '@/lib/proxyService'
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic'
+
 /**
  * POST /api/proxy/record
  * 记录代理使用

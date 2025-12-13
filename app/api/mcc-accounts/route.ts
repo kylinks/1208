@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic'
+
 // 获取MCC账号列表
 export async function GET(request: NextRequest) {
   try {

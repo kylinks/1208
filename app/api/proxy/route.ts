@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAvailableProxy, cleanupOldProxyRecords } from '@/lib/proxyService'
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic'
+
 /**
  * GET /api/proxy
  * 获取可用的代理配置

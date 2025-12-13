@@ -5,6 +5,9 @@ import { ProxyAgent, fetch as undiciFetch } from 'undici'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic'
+
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ success: false, error: message }, { status })
 }

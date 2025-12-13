@@ -10,6 +10,9 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 
+// 强制动态渲染，避免构建时静态生成
+export const dynamic = 'force-dynamic';
+
 /**
  * GET - 获取单个广告系列
  */
