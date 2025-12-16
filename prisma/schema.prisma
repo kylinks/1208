@@ -30,6 +30,8 @@ model User {
   systemConfigLogs SystemConfig[]
   /// 分配的代理供应商关联
   assignedProxies  ProxyProviderUser[]
+  /// 用户监控调度配置（一对一）
+  monitorSchedule  UserMonitorSchedule?
 
   @@index([tenantId])
   @@map("User")
@@ -390,4 +392,37 @@ enum MonitorStatus {
   failed
   /// 跳过
   skipped
+}
+
+/// 用户监控调度配置（每用户一条，用于"每人不同间隔"的DB驱动调度）
+model UserMonitorSchedule {
+  id              String    @id @default(uuid())
+  /// 关联的用户ID（一对一）
+  userId          String    @unique
+  /// 是否启用自动监控
+  enabled         Boolean   @default(true)
+  /// 监控间隔（分钟）
+  intervalMinutes Int       @default(5)
+  /// 下次应执行的时间（调度器依据此字段判断"到期"）
+  nextRunAt       DateTime  @default(now())
+  /// 锁定到期时间（防止并发重复领取）
+  lockedUntil     DateTime?
+  /// 锁持有者标识（worker token/进程id）
+  lockedBy        String?   @db.VarChar(100)
+  /// 上次执行时间
+  lastRunAt       DateTime?
+  /// 上次执行状态
+  lastStatus      MonitorStatus?
+  /// 上次执行错误信息
+  lastError       String?   @db.Text
+  /// 上次执行耗时（毫秒）
+  lastDuration    Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([enabled, nextRunAt])
+  @@index([lockedUntil])
+  @@map("UserMonitorSchedule")
 }

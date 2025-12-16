@@ -70,6 +70,21 @@ function cleanExpiredCache() {
   }
 }
 
+// 整体请求超时时间（毫秒）- 避免无限等待 Google Ads API 重试
+const REQUEST_TIMEOUT_MS = 60 * 1000; // 60 秒
+
+/**
+ * 带超时的 Promise 包装
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+    ),
+  ]);
+}
+
 /**
  * POST - 验证 MCC 账户
  */
@@ -194,7 +209,12 @@ export async function POST(request: NextRequest) {
     // 同一进程内并发去重：相同 mccId 同时验证只发起一次真实请求
     const existingInFlight = inFlightVerify.get(mccId);
     if (existingInFlight) {
-      const result = await existingInFlight;
+      // 等待已存在的请求，但也要设置超时
+      const result = await withTimeout(
+        existingInFlight,
+        REQUEST_TIMEOUT_MS,
+        'MCC 验证超时，Google Ads API 响应过慢，请稍后重试'
+      );
       return NextResponse.json({
         success: true,
         data: result,
@@ -216,7 +236,12 @@ export async function POST(request: NextRequest) {
       inFlightVerify.delete(mccId);
     });
 
-    const result = await inFlightPromise;
+    // 使用超时包装，避免无限等待
+    const result = await withTimeout(
+      inFlightPromise,
+      REQUEST_TIMEOUT_MS,
+      'MCC 验证超时，Google Ads API 可能遇到配额限制（429），请等待 1-2 分钟后重试'
+    );
 
     // 存入内存缓存
     mccVerifyCache.set(mccId, {

@@ -18,6 +18,7 @@ import {
   Alert,
   Descriptions,
   Typography,
+  Spin,
 } from 'antd'
 import {
   PlusOutlined,
@@ -28,6 +29,7 @@ import {
   CloudServerOutlined,
   TeamOutlined,
   StopOutlined,
+  LoadingOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { OverviewKpiCard } from '../components/OverviewKpiCard'
@@ -165,7 +167,17 @@ export default function MccManagement() {
         body: JSON.stringify({ mccId }),
       })
 
-      const result = await response.json()
+      // 尝试解析响应，处理非 JSON 响应的情况
+      let result: any
+      const contentType = response.headers.get('content-type')
+      if (contentType && contentType.includes('application/json')) {
+        result = await response.json()
+      } else {
+        // 如果响应不是 JSON（可能是 HTML 错误页面），提供友好的错误信息
+        const text = await response.text()
+        console.error('非 JSON 响应:', text.substring(0, 200))
+        throw new Error('服务器响应异常，请稍后重试。可能是 Google Ads API 配额限制，请等待 1-2 分钟后再试。')
+      }
 
       if (!response.ok) {
         throw new Error(result.error || '验证失败')
@@ -453,7 +465,10 @@ export default function MccManagement() {
         width={700}
         okText="确认添加"
         cancelText="取消"
-        okButtonProps={{ disabled: !verifyResult }}
+        okButtonProps={{ disabled: !verifyResult || verifying }}
+        cancelButtonProps={{ disabled: verifying }}
+        closable={!verifying}
+        maskClosable={!verifying}
       >
         <Form form={form} layout="vertical" className="mt-4">
           <Form.Item
@@ -467,12 +482,13 @@ export default function MccManagement() {
             <Input.Search
               placeholder="格式：968-646-8564"
               enterButton={
-                <Button type="primary" icon={<SearchOutlined />}>
-                  验证
+                <Button type="primary" icon={verifying ? <LoadingOutlined /> : <SearchOutlined />} disabled={verifying}>
+                  {verifying ? '验证中...' : '验证'}
                 </Button>
               }
               onSearch={handleVerify}
               loading={verifying}
+              disabled={verifying}
               onChange={() => {
                 setVerifyResult(null)
                 setVerifyError(null)
@@ -480,8 +496,23 @@ export default function MccManagement() {
             />
           </Form.Item>
 
+          {/* 验证中提示 */}
+          {verifying && (
+            <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <div className="flex items-center gap-3">
+                <Spin indicator={<LoadingOutlined style={{ fontSize: 24, color: '#1890ff' }} spin />} />
+                <div>
+                  <div className="font-medium text-blue-700">正在验证 MCC 账号...</div>
+                  <div className="text-sm text-blue-600 mt-1">
+                    正在连接 Google Ads API，请稍候（可能需要 10-30 秒）
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* 验证错误提示 */}
-          {verifyError && (
+          {!verifying && verifyError && (
             <Alert
               message="验证失败"
               description={verifyError}
@@ -492,7 +523,7 @@ export default function MccManagement() {
           )}
 
           {/* 验证成功展示 */}
-          {verifyResult && (
+          {!verifying && verifyResult && (
             <Card
               size="small"
               style={{ background: '#f6ffed', borderColor: '#b7eb8f' }}
@@ -541,7 +572,7 @@ export default function MccManagement() {
           )}
 
           {/* 提示信息 */}
-          {!verifyResult && !verifyError && (
+          {!verifying && !verifyResult && !verifyError && (
             <Alert
               message="使用说明"
               description="请输入 MCC 账号 ID 并点击「验证」按钮。系统将调用 Google Ads API 验证该 MCC 是否存在且服务账号有权限访问。"
