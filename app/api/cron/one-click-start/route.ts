@@ -368,7 +368,7 @@ async function handleDispatch() {
  * 为用户初始化调度配置（如果不存在）
  * 可在用户登录/创建时调用，或在调度时自动创建
  */
-export async function ensureUserSchedule(userId: string, intervalMinutes?: number) {
+async function ensureUserSchedule(userId: string, intervalMinutes?: number) {
   const existing = await prisma.userMonitorSchedule.findUnique({
     where: { userId },
   })

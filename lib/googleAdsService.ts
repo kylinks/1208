@@ -65,16 +65,14 @@ class GoogleAdsService {
   private tokenExpiresAt: number = 0;
   private apiVersion: string = 'v22';
   
-  // 重试配置（针对 Google Ads API 429 配额错误优化）
-  private maxRetries: number = 5; // 增加到 5 次
-  private baseRetryDelayMs: number = 10000; // 初始等待 10 秒（Google API 配额错误需要更长等待）
+  // 重试配置（简化版：小团队场景）
+  private maxRetries: number = 3;
+  private baseRetryDelayMs: number = 5000; // 5 秒
 
-  // ============== 全局限流（同一进程内，排队等待） ==============
-  // 说明：Google Ads API 有较严格的频控/配额，且本项目在 sync/monitor 场景会产生并发。
-  // 这里在 Service 内统一做“令牌桶”限流 + 排队等待，确保所有调用链一致。
-  private limitRps: number = 1; // 每秒补充 token
-  private limitBurst: number = 3; // 最大突发
-  private limitMaxWaitMs: number = 60_000; // 最长排队等待（用户选择：429 时可排队更稳）
+  // ============== 简化限流（小团队版：互斥锁 + 固定延迟） ==============
+  // 适用场景：12 人左右的小团队，每人管理约 50 个广告系列
+  // 原理：每次 API 调用后固定等待，确保请求间隔足够长
+  private requestDelayMs: number = 1000; // 每次请求后等待 1 秒（可通过 GOOGLEADS_DELAY_MS 覆盖）
 
   private getEnvInt(key: string, fallback: number) {
     const raw = process.env[key];
@@ -83,41 +81,40 @@ class GoogleAdsService {
     return Number.isFinite(n) ? n : fallback;
   }
 
-  private getTokenBucket(): { tokens: number; lastRefillAt: number } {
+  // 全局互斥锁：确保同一时间只有一个请求在执行
+  private getGlobalLock(): { locked: boolean; queue: (() => void)[] } {
     const g = globalThis as any;
-    if (!g.__googleAdsTokenBucket) {
-      g.__googleAdsTokenBucket = { tokens: this.limitBurst, lastRefillAt: Date.now() } as {
-        tokens: number;
-        lastRefillAt: number;
-      };
+    if (!g.__googleAdsLock) {
+      g.__googleAdsLock = { locked: false, queue: [] };
     }
-    return g.__googleAdsTokenBucket;
+    return g.__googleAdsLock;
   }
 
-  private async acquireToken(): Promise<boolean> {
-    const start = Date.now();
-    const bucket = this.getTokenBucket();
-
-    while (Date.now() - start < this.limitMaxWaitMs) {
-      const now = Date.now();
-      const elapsedMs = Math.max(0, now - bucket.lastRefillAt);
-      if (elapsedMs > 0) {
-        const refill = (elapsedMs / 1000) * this.limitRps;
-        if (refill > 0) {
-          bucket.tokens = Math.min(this.limitBurst, bucket.tokens + refill);
-          bucket.lastRefillAt = now;
-        }
-      }
-
-      if (bucket.tokens >= 1) {
-        bucket.tokens -= 1;
-        return true;
-      }
-
-      await this.delay(150);
+  // 获取锁（排队等待）
+  private async acquireLock(): Promise<void> {
+    const lock = this.getGlobalLock();
+    
+    if (!lock.locked) {
+      lock.locked = true;
+      return;
     }
 
-    return false;
+    // 排队等待
+    return new Promise<void>((resolve) => {
+      lock.queue.push(resolve);
+    });
+  }
+
+  // 释放锁（通知下一个等待者）
+  private releaseLock(): void {
+    const lock = this.getGlobalLock();
+    
+    if (lock.queue.length > 0) {
+      const next = lock.queue.shift();
+      next?.();
+    } else {
+      lock.locked = false;
+    }
   }
 
   constructor() {
@@ -131,13 +128,9 @@ class GoogleAdsService {
       throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY_PATH 环境变量未配置');
     }
 
-    // 统一限流配置（可通过 env 覆盖）
-    // - GOOGLEADS_RPS: 每秒 token 补充数
-    // - GOOGLEADS_BURST: 突发 token 上限
-    // - GOOGLEADS_MAX_WAIT_MS: 排队最长等待
-    this.limitRps = this.getEnvInt('GOOGLEADS_RPS', this.limitRps);
-    this.limitBurst = this.getEnvInt('GOOGLEADS_BURST', this.limitBurst);
-    this.limitMaxWaitMs = this.getEnvInt('GOOGLEADS_MAX_WAIT_MS', this.limitMaxWaitMs);
+    // 简化配置：只需一个延迟参数
+    // GOOGLEADS_DELAY_MS: 每次请求后的固定延迟（毫秒）
+    this.requestDelayMs = this.getEnvInt('GOOGLEADS_DELAY_MS', this.requestDelayMs);
   }
 
   /**
@@ -149,7 +142,7 @@ class GoogleAdsService {
   }
 
   /**
-   * 带重试机制的 fetch 请求（指数退避 + Retry-After 支持）
+   * 带重试机制的 fetch 请求（简化版：互斥锁 + 固定延迟 + 基础重试）
    * @param url - 请求 URL
    * @param options - fetch 选项
    * @param retryCount - 当前重试次数
@@ -160,63 +153,63 @@ class GoogleAdsService {
     options: RequestInit,
     retryCount: number = 0
   ): Promise<Response> {
-    // 全局限流：先排队拿 token，避免瞬时并发把配额打爆
-    const ok = await this.acquireToken();
-    if (!ok) {
-      // 排队超时：直接抛错，让上层给出“排队中/稍后再试”的语义
-      throw new Error('Google Ads 请求过多，排队超时，请稍后再试');
-    }
+    // 获取全局锁，确保同一时间只有一个请求（注意：锁不可重入，因此这里用循环重试，避免递归再次抢锁导致死锁）
+    await this.acquireLock();
 
-    const response = await fetch(url, options);
+    try {
+      let attempt = retryCount;
+      let lastResponse: Response | null = null;
 
-    // 需要重试的状态码：429 配额/限流、5xx 临时不可用
-    const shouldRetryStatus =
-      response.status === 429 ||
-      response.status === 500 ||
-      response.status === 502 ||
-      response.status === 503 ||
-      response.status === 504 ||
-      response.status === 408;
+      while (true) {
+        const response = await fetch(url, options);
+        lastResponse = response;
 
-    // 如果遇到可重试错误且还有重试次数
-    if (shouldRetryStatus && retryCount < this.maxRetries) {
-      // 优先使用 Retry-After 响应头（如果存在）
-      const retryAfterHeader = response.headers.get('Retry-After');
-      let delayMs: number;
-      
-      if (retryAfterHeader) {
-        // Retry-After 可能是秒数或日期
-        const retryAfterSeconds = parseInt(retryAfterHeader, 10);
-        if (!isNaN(retryAfterSeconds)) {
-          delayMs = retryAfterSeconds * 1000;
-        } else {
-          // 如果是日期格式，计算等待时间
-          const retryDate = new Date(retryAfterHeader);
-          delayMs = Math.max(retryDate.getTime() - Date.now(), this.baseRetryDelayMs);
+        // 需要重试的状态码：429 配额/限流、5xx 临时不可用
+        const shouldRetryStatus =
+          response.status === 429 ||
+          response.status === 500 ||
+          response.status === 502 ||
+          response.status === 503 ||
+          response.status === 504;
+
+        // 可重试且仍有次数：等待后继续循环
+        if (shouldRetryStatus && attempt < this.maxRetries) {
+          // 优先尊重 Retry-After（若有），否则指数退避
+          const retryAfterHeader = response.headers.get('Retry-After');
+          let delayMs: number | null = null;
+
+          if (retryAfterHeader) {
+            const retryAfterSeconds = Number.parseInt(retryAfterHeader, 10);
+            if (Number.isFinite(retryAfterSeconds)) {
+              delayMs = retryAfterSeconds * 1000;
+            } else {
+              const retryDate = new Date(retryAfterHeader);
+              const ms = retryDate.getTime() - Date.now();
+              delayMs = Number.isFinite(ms) ? Math.max(ms, this.baseRetryDelayMs) : null;
+            }
+          }
+
+          if (delayMs == null) {
+            delayMs = this.baseRetryDelayMs * Math.pow(2, attempt);
+          }
+
+          console.log(
+            `⏳ Google Ads API 错误 (${response.status})，${(delayMs / 1000).toFixed(0)} 秒后重试... ` +
+            `(第 ${attempt + 1}/${this.maxRetries} 次)`
+          );
+
+          await this.delay(delayMs);
+          attempt += 1;
+          continue;
         }
-      } else {
-        // 使用指数退避: base * 2^n
-        delayMs = this.baseRetryDelayMs * Math.pow(2, retryCount);
+
+        return response;
       }
-      
-      // 加入抖动（equal-jitter）：避免多请求在同一时刻一起重试造成“重试风暴”
-      // delay' = delay/2 + random(0, delay/2)
-      const half = Math.max(500, Math.floor(delayMs / 2));
-      delayMs = half + Math.floor(Math.random() * half);
-
-      // 限制最大等待时间为 2 分钟（验证场景不宜过久）
-      delayMs = Math.min(delayMs, 2 * 60 * 1000);
-      
-      console.log(
-        `⏳ Google Ads API 可重试错误 (${response.status})，${(delayMs / 1000).toFixed(0)} 秒后重试... ` +
-        `(第 ${retryCount + 1}/${this.maxRetries} 次)`
-      );
-      
-      await this.delay(delayMs);
-      return this.fetchWithRetry(url, options, retryCount + 1);
+    } finally {
+      // 每次请求完成后固定延迟再释放锁（削峰防 429）
+      await this.delay(this.requestDelayMs);
+      this.releaseLock();
     }
-
-    return response;
   }
 
   /**
@@ -1105,25 +1098,163 @@ class GoogleAdsService {
     updates: { cidId: string; campaignId: string; finalUrlSuffix: string }[]
   ): Promise<Map<string, { success: boolean; error?: string }>> {
     const results = new Map<string, { success: boolean; error?: string }>();
+    if (!updates || updates.length === 0) return results;
 
-    // 按 CID 分组
+    await this.initialize();
+
+    const formattedMccId = this.formatMccId(mccId);
+    const OPERATIONS_CHUNK_SIZE = 100; // 按你的要求：每次 mutate 最多 100 条
+
+    const chunk = <T>(arr: T[], size: number): T[][] => {
+      const out: T[][] = [];
+      for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+      return out;
+    };
+
+    const extractCampaignIdFromResourceName = (resourceName: string | undefined): string | null => {
+      if (!resourceName) return null;
+      // resourceName 形如：customers/{cid}/campaigns/{campaignId}
+      const m = /\/campaigns\/(\d+)$/.exec(resourceName);
+      return m?.[1] ?? null;
+    };
+
+    const formatBatchError = (status: number, responseText: string, requestId?: string): string => {
+      let errorMsg = `更新失败(HTTP ${status})`;
+      try {
+        const errorData = JSON.parse(responseText);
+        const apiError = errorData?.error || errorData;
+        const code = apiError?.code;
+        const statusText = apiError?.status;
+        const message = apiError?.message;
+        const details = apiError?.details;
+
+        const parts: string[] = [];
+        parts.push(`HTTP ${status}`);
+        if (typeof code === 'number' || typeof code === 'string') parts.push(`code=${code}`);
+        if (typeof statusText === 'string') parts.push(`status=${statusText}`);
+        if (requestId) parts.push(`requestId=${requestId}`);
+        if (typeof message === 'string' && message.trim()) parts.push(message.trim());
+
+        let detailsStr = '';
+        if (details !== undefined) {
+          try {
+            detailsStr = JSON.stringify(details);
+          } catch {
+            detailsStr = String(details);
+          }
+        }
+        if (detailsStr) {
+          const truncated = detailsStr.length > 400 ? detailsStr.substring(0, 400) + '...' : detailsStr;
+          parts.push(`details=${truncated}`);
+        }
+        errorMsg = parts.join(' | ');
+      } catch {
+        const safeText = responseText.substring(0, 200);
+        errorMsg = requestId
+          ? `HTTP ${status} | requestId=${requestId} | ${safeText}`
+          : `HTTP ${status} | ${safeText}`;
+      }
+      return errorMsg;
+    };
+
+    // 按 CID 分组（Google Ads API 的天然边界：一次 mutate 只能针对一个 customer/CID）
     const cidGroups = new Map<string, typeof updates>();
-    for (const update of updates) {
-      const group = cidGroups.get(update.cidId) || [];
-      group.push(update);
-      cidGroups.set(update.cidId, group);
+    for (const u of updates) {
+      const group = cidGroups.get(u.cidId) || [];
+      group.push(u);
+      cidGroups.set(u.cidId, group);
     }
 
-    // 遍历每个 CID 执行更新
     for (const [cidId, cidUpdates] of cidGroups) {
-      for (const update of cidUpdates) {
-        const result = await this.updateCampaignFinalUrlSuffix(
-          mccId,
-          cidId,
-          update.campaignId,
-          update.finalUrlSuffix
-        );
-        results.set(update.campaignId, result);
+      const formattedCidId = cidId.replace(/-/g, '');
+      const apiUrl = `https://googleads.googleapis.com/${this.apiVersion}/customers/${formattedCidId}/campaigns:mutate`;
+
+      // 每 CID 再按 100 条 operations 分片
+      const batches = chunk(cidUpdates, OPERATIONS_CHUNK_SIZE);
+      for (const batch of batches) {
+        const requestBody = {
+          partialFailure: true,
+          operations: batch.map((u) => ({
+            updateMask: 'finalUrlSuffix',
+            update: {
+              resourceName: `customers/${formattedCidId}/campaigns/${u.campaignId}`,
+              finalUrlSuffix: u.finalUrlSuffix,
+            },
+          })),
+        };
+
+        try {
+          console.log('📡 批量更新广告系列最终到达网址后缀:', {
+            mccId: formattedMccId,
+            cidId: formattedCidId,
+            operations: batch.length,
+          });
+
+          const response = await this.fetchWithRetry(apiUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${this.accessToken}`,
+              'developer-token': this.developerToken,
+              'login-customer-id': formattedMccId,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestBody),
+          });
+
+          if (!response.ok) {
+            const responseText = await response.text();
+            const requestId =
+              response.headers.get('request-id') ||
+              response.headers.get('x-request-id') ||
+              undefined;
+
+            const errorMsg = formatBatchError(response.status, responseText, requestId);
+            console.error('❌ 批量更新后缀失败:', {
+              status: response.status,
+              requestId,
+              cidId: formattedCidId,
+              operations: batch.length,
+              error: errorMsg,
+            });
+
+            for (const u of batch) results.set(u.campaignId, { success: false, error: errorMsg });
+            continue;
+          }
+
+          const data = await response.json();
+          const okResourceNames: string[] = Array.isArray(data?.results)
+            ? data.results.map((r: any) => r?.resourceName).filter(Boolean)
+            : [];
+
+          const successIds = new Set<string>();
+          for (const rn of okResourceNames) {
+            const id = extractCampaignIdFromResourceName(rn);
+            if (id) successIds.add(id);
+          }
+
+          // 如果出现 partialFailureError，则无法精确映射每条 operation 的失败原因（需要解析 details protobuf）。
+          // 这里采用稳妥策略：能从 results 推断成功的标为成功，其余标为失败，并带上可读的截断错误信息。
+          const partialFailureMsg = data?.partialFailureError?.message
+            ? String(data.partialFailureError.message)
+            : data?.partial_failure_error?.message
+              ? String(data.partial_failure_error.message)
+              : '';
+
+          for (const u of batch) {
+            if (successIds.has(String(u.campaignId))) {
+              results.set(u.campaignId, { success: true });
+            } else if (partialFailureMsg) {
+              results.set(u.campaignId, { success: false, error: `partialFailure: ${partialFailureMsg}`.slice(0, 800) });
+            } else {
+              // 没有 partialFailureError，但也没出现在 results：保守起见标记失败，便于审计
+              results.set(u.campaignId, { success: false, error: '批量更新返回异常：未包含该 campaign 的结果' });
+            }
+          }
+        } catch (e: any) {
+          const msg = e?.message || String(e);
+          console.error('❌ 批量更新后缀异常:', { cidId: formattedCidId, error: msg });
+          for (const u of batch) results.set(u.campaignId, { success: false, error: msg });
+        }
       }
     }
 

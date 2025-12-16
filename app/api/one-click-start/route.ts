@@ -150,6 +150,13 @@ export async function runOneClickStartForUser(userId: string) {
   console.log(`📊 获取点击数完成，耗时 ${Date.now() - startTime}ms userId=${userId}`)
 
   // 并行处理广告系列（使用并发控制）
+  const pendingGoogleAdsUpdates: {
+    mccId: string
+    cidId: string
+    campaignId: string
+    finalUrlSuffix: string
+  }[] = []
+
   const processResults = await runWithConcurrencyLimit<typeof campaigns[number], ProcessResult>(
     campaigns,
     CONCURRENCY_LIMIT,
@@ -159,10 +166,64 @@ export async function runOneClickStartForUser(userId: string) {
         campaign as CampaignWithConfig,
         todayClicks,
         sharedData,
-        googleAdsService
+        googleAdsService,
+        pendingGoogleAdsUpdates
       )
     }
   )
+
+  // ============== 批量提交 Google Ads 后缀更新（按 MCC/CID 聚合） ==============
+  if (pendingGoogleAdsUpdates.length > 0) {
+    console.log(`🧩 待批量更新 Google Ads 后缀数: ${pendingGoogleAdsUpdates.length} 条 userId=${userId}`)
+
+    // 按 MCC 分组（login-customer-id 维度）
+    const mccUpdateGroups = new Map<string, typeof pendingGoogleAdsUpdates>()
+    for (const u of pendingGoogleAdsUpdates) {
+      const group = mccUpdateGroups.get(u.mccId) || []
+      group.push(u)
+      mccUpdateGroups.set(u.mccId, group)
+    }
+
+    const googleAdsResultMap = new Map<string, { success: boolean; error?: string }>()
+    for (const [mccId, updates] of mccUpdateGroups) {
+      const perMccUpdates = updates.map(u => ({
+        cidId: u.cidId,
+        campaignId: u.campaignId,
+        finalUrlSuffix: u.finalUrlSuffix,
+      }))
+
+      const resultMap = await googleAdsService.batchUpdateCampaignFinalUrlSuffix(mccId, perMccUpdates)
+      for (const [campaignId, r] of resultMap) {
+        googleAdsResultMap.set(campaignId, r)
+      }
+    }
+
+    // 回填到结果里（仅对本次尝试过更新的 campaign）
+    const attemptedSet = new Set(pendingGoogleAdsUpdates.map(u => u.campaignId))
+    let attempted = 0
+    let succeeded = 0
+    let failed = 0
+
+    for (const r of processResults) {
+      if (r.status !== 'updated') continue
+      if (!r.newLink) continue
+      if (!attemptedSet.has(r.campaignId)) continue
+
+      attempted += 1
+      const res = googleAdsResultMap.get(r.campaignId)
+      if (res?.success) {
+        r.googleAdsUpdated = true
+        r.googleAdsError = undefined
+        succeeded += 1
+      } else {
+        r.googleAdsUpdated = false
+        r.googleAdsError = res?.error || '批量更新未返回该 campaign 的结果'
+        failed += 1
+      }
+    }
+
+    console.log(`🧾 Google Ads 批量更新完成 userId=${userId} attempted=${attempted} success=${succeeded} failed=${failed}`)
+  }
 
   // 统计结果
   let processed = 0
@@ -829,7 +890,13 @@ async function processSingleCampaign(
   campaign: CampaignWithConfig,
   todayClicks: number,
   sharedData: SharedData,
-  googleAdsService: any
+  googleAdsService: any,
+  pendingGoogleAdsUpdates: {
+    mccId: string
+    cidId: string
+    campaignId: string
+    finalUrlSuffix: string
+  }[]
 ): Promise<ProcessResult> {
   let lastClicks = campaign.lastClicks
   let crossDayReset = false
@@ -954,28 +1021,15 @@ async function processSingleCampaign(
       ] : []),
     ])
 
-    // 使用 Google Ads API 更新广告系列的最终到达网址后缀
-    // 注意：只有在确实提取到 suffix 且发起了更新请求时，才写入 googleAdsUpdated。
-    // 否则保持 undefined，前端会显示为“未尝试更新”，避免误报“更新失败”。
-    let googleAdsUpdateSuccess: boolean | undefined
-    let googleAdsError: string | undefined
-    
+    // 【建议 C：合并写】不在这里逐 campaign 调用 mutate（容易放大请求数触发 429）
+    // 这里只收集待更新项，统一在 runOneClickStartForUser 结束时按 MCC/CID 聚合批量提交（每次最多 100 operations）
     if (newLinkSuffix) {
-      console.log(`📝 更新 Google Ads 最终到达网址后缀: ${campaign.name}`)
-      const updateResult = await googleAdsService.updateCampaignFinalUrlSuffix(
-        campaign.cidAccount.mccAccount.mccId,
-        campaign.cidAccount.cid,
-        campaign.campaignId,
-        newLinkSuffix
-      )
-      googleAdsUpdateSuccess = updateResult.success
-      googleAdsError = updateResult.error
-      
-      if (updateResult.success) {
-        console.log(`✅ Google Ads 后缀更新成功: ${campaign.name}`)
-      } else {
-        console.warn(`⚠️ Google Ads 后缀更新失败: ${campaign.name}, 错误: ${updateResult.error}`)
-      }
+      pendingGoogleAdsUpdates.push({
+        mccId: campaign.cidAccount.mccAccount.mccId,
+        cidId: campaign.cidAccount.cid,
+        campaignId: campaign.campaignId,
+        finalUrlSuffix: newLinkSuffix,
+      })
     }
 
     return {
@@ -989,8 +1043,7 @@ async function processSingleCampaign(
       affiliateLink: affiliateConfig.affiliateLink,
       finalUrl: verifyResult.finalUrl,
       proxyIp: verifyResult.proxyIp,
-      googleAdsUpdated: googleAdsUpdateSuccess,
-      googleAdsError: googleAdsError,
+      // googleAdsUpdated / googleAdsError：后续批量提交后再回填
     }
   } catch (dbError: any) {
     console.error('数据库更新失败:', dbError)

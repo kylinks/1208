@@ -88,7 +88,7 @@ cp env.example .env
 # - NEXTAUTH_SECRET: NextAuth密钥
 # - GOOGLE_ADS_DEVELOPER_TOKEN: Google Ads开发者令牌
 # - GOOGLE_SERVICE_ACCOUNT_KEY_PATH: Google 服务账号密钥路径
-# - （可选）GOOGLEADS_RPS/BURST/MAX_WAIT_MS: Google Ads 请求排队限流参数
+# - （可选）GOOGLEADS_DELAY_MS: Google Ads 请求固定延迟（小团队推荐 1000~2000ms）
 # - （可选）GOOGLEADS_CID_CONCURRENCY / ONECLICK_GOOGLEADS_MCC_CONCURRENCY: 同步/监控削峰参数
 ```
 
