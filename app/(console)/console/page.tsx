@@ -1,6 +1,6 @@
 'use client'
 
-import { Card, Row, Col, Statistic, Table, Tag, Space, Tooltip, Button, Badge } from 'antd'
+import { Card, Table, Tag, Space, Tooltip, Button, Badge } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   ArrowUpOutlined,
@@ -10,9 +10,12 @@ import {
   LinkOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  ThunderboltOutlined,
+  CheckCircleOutlined,
 } from '@ant-design/icons'
 import { useEffect, useState, useCallback } from 'react'
 import { useMonitor } from '../MonitorContext'
+import { OverviewKpiCard } from './components/OverviewKpiCard'
 
 interface DashboardStats {
   totalCampaigns: number
@@ -147,7 +150,7 @@ export default function ConsoleDashboard() {
       fetchDashboardStats()
       fetchMonitoringData(pagination.current, pagination.pageSize)
     }
-  }, [lastExecutionTime])
+  }, [lastExecutionTime, fetchDashboardStats, fetchMonitoringData, pagination.current, pagination.pageSize])
 
   // 处理表格分页变化
   const handleTableChange = (paginationConfig: any) => {
@@ -352,59 +355,67 @@ export default function ConsoleDashboard() {
       </div>
 
       {/* 统计卡片 */}
-      <Row gutter={16}>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic
-              title="总广告系列"
-              value={stats.totalCampaigns}
-              valueStyle={{ color: '#1890ff' }}
-              prefix={<SyncOutlined spin={loading} />}
-              loading={loading}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic
-              title="今日点击数"
-              value={stats.todayClicks}
-              precision={0}
-              valueStyle={{ color: stats.clicksChange >= 0 ? '#3f8600' : '#cf1322' }}
-              prefix={stats.clicksChange >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
-              suffix={
-                <span className="text-sm">
-                  {stats.clicksChange >= 0 ? '+' : ''}
-                  {stats.clicksChange}%
-                </span>
-              }
-              loading={loading}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic
-              title="今日换链总数"
-              value={stats.todayReplacements}
-              valueStyle={{ color: '#faad14' }}
-              loading={loading}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic
-              title="换链成功率"
-              value={stats.successRate}
-              precision={1}
-              valueStyle={{ color: '#52c41a' }}
-              suffix="%"
-              loading={loading}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <OverviewKpiCard
+          title="总广告系列"
+          icon={<SyncOutlined spin={loading} />}
+          value={<span className="tabular-nums">{stats.totalCampaigns.toLocaleString()}</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-orange-50',
+            border: 'border-orange-200',
+            titleText: 'text-orange-700',
+            valueText: 'text-orange-600',
+            iconBg: 'bg-orange-100',
+            iconText: 'text-orange-700',
+          }}
+        />
+
+        <OverviewKpiCard
+          title="今日点击数"
+          icon={stats.clicksChange >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
+          value={<span className="tabular-nums">{stats.todayClicks.toLocaleString()}</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-sky-50',
+            border: 'border-sky-200',
+            titleText: 'text-sky-700',
+            valueText: 'text-sky-600',
+            iconBg: 'bg-sky-100',
+            iconText: 'text-sky-700',
+          }}
+        />
+
+        <OverviewKpiCard
+          title="今日换链总数"
+          icon={<ThunderboltOutlined />}
+          value={<span className="tabular-nums">{stats.todayReplacements.toLocaleString()}</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-emerald-50',
+            border: 'border-emerald-200',
+            titleText: 'text-emerald-700',
+            valueText: 'text-emerald-600',
+            iconBg: 'bg-emerald-100',
+            iconText: 'text-emerald-700',
+          }}
+        />
+
+        <OverviewKpiCard
+          title="换链成功率"
+          icon={<CheckCircleOutlined />}
+          value={<span className="tabular-nums">{stats.successRate.toFixed(0)}%</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-violet-50',
+            border: 'border-violet-200',
+            titleText: 'text-violet-700',
+            valueText: 'text-violet-600',
+            iconBg: 'bg-violet-100',
+            iconText: 'text-violet-700',
+          }}
+        />
+      </div>
 
       {/* 广告系列监控列表 */}
       <Card

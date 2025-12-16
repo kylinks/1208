@@ -16,17 +16,31 @@ export interface ProxyConfig {
  * 获取可用的代理配置
  * @param countryCode 国家代码 (如: US, GB, DE)
  * @param campaignId 广告系列ID (用于24小时IP去重)
+ * @param userId 用户ID (可选，用于检查用户是否有权限使用代理)
  * @returns 代理配置或null
  */
 export async function getAvailableProxy(
   countryCode: string,
-  campaignId: string
+  campaignId: string,
+  userId?: string
 ): Promise<ProxyConfig | null> {
   try {
     // 1. 获取启用的代理供应商（按优先级排序）
+    // 只获取已分配给该用户的代理供应商（未分配任何用户的代理不可用）
     const providers = await prisma.proxyProvider.findMany({
       where: {
         enabled: true,
+        // 必须分配给当前用户才能使用
+        ...(userId ? {
+          assignedUsers: {
+            some: {
+              userId: userId
+            }
+          }
+        } : {
+          // 如果没有传入userId，则不返回任何代理（安全策略）
+          id: { equals: 'impossible-id-that-never-exists' }
+        })
       },
       orderBy: [
         { priority: 'asc' },
@@ -35,7 +49,7 @@ export async function getAvailableProxy(
     })
 
     if (providers.length === 0) {
-      console.warn('没有可用的代理供应商')
+      console.warn(`没有可用的代理供应商 (用户ID: ${userId || '未指定'})`)
       return null
     }
 

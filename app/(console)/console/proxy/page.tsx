@@ -17,6 +17,8 @@ import {
   Card,
   Row,
   Col,
+  Transfer,
+  Tag,
 } from 'antd'
 import {
   PlusOutlined,
@@ -24,8 +26,10 @@ import {
   DeleteOutlined,
   ApiOutlined,
   CheckCircleOutlined,
+  TeamOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import type { TransferProps } from 'antd'
 
 interface ProxyProvider {
   id: string
@@ -39,6 +43,14 @@ interface ProxyProvider {
   lastFailedAt?: string
   createdAt: string
   updatedAt: string
+  assignedUserCount?: number
+}
+
+interface User {
+  id: string
+  name: string
+  email: string
+  role: string
 }
 
 export default function ProxyManagement() {
@@ -47,6 +59,13 @@ export default function ProxyManagement() {
   const [modalVisible, setModalVisible] = useState(false)
   const [editingProvider, setEditingProvider] = useState<ProxyProvider | null>(null)
   const [form] = Form.useForm()
+
+  // 分配用户相关状态
+  const [assignModalVisible, setAssignModalVisible] = useState(false)
+  const [assigningProvider, setAssigningProvider] = useState<ProxyProvider | null>(null)
+  const [allUsers, setAllUsers] = useState<User[]>([])
+  const [assignedUserIds, setAssignedUserIds] = useState<string[]>([])
+  const [assignLoading, setAssignLoading] = useState(false)
 
   useEffect(() => {
     fetchProviders()
@@ -60,13 +79,111 @@ export default function ProxyManagement() {
         throw new Error('获取代理供应商失败')
       }
       const data = await response.json()
-      setProviders(data)
+      
+      // 获取每个供应商的分配用户数量
+      const providersWithCount = await Promise.all(
+        data.map(async (provider: ProxyProvider) => {
+          try {
+            const res = await fetch(`/api/proxy-providers/${provider.id}/users`)
+            if (res.ok) {
+              const result = await res.json()
+              return { ...provider, assignedUserCount: result.data?.assignedUserIds?.length || 0 }
+            }
+          } catch {
+            // 忽略错误
+          }
+          return { ...provider, assignedUserCount: 0 }
+        })
+      )
+      
+      setProviders(providersWithCount)
     } catch (error) {
       message.error('获取代理供应商失败')
       console.error(error)
     } finally {
       setLoading(false)
     }
+  }
+
+  // 获取所有用户列表
+  const fetchAllUsers = async () => {
+    try {
+      const response = await fetch('/api/users?pageSize=1000')
+      if (response.ok) {
+        const result = await response.json()
+        setAllUsers(result.data || [])
+      }
+    } catch (error) {
+      console.error('获取用户列表失败:', error)
+    }
+  }
+
+  // 获取代理供应商已分配的用户
+  const fetchAssignedUsers = async (providerId: string) => {
+    try {
+      const response = await fetch(`/api/proxy-providers/${providerId}/users`)
+      if (response.ok) {
+        const result = await response.json()
+        setAssignedUserIds(result.data?.assignedUserIds || [])
+      }
+    } catch (error) {
+      console.error('获取分配用户失败:', error)
+      setAssignedUserIds([])
+    }
+  }
+
+  // 打开分配弹窗
+  const handleAssign = async (record: ProxyProvider) => {
+    setAssigningProvider(record)
+    setAssignLoading(true)
+    setAssignModalVisible(true)
+    
+    await Promise.all([
+      fetchAllUsers(),
+      fetchAssignedUsers(record.id)
+    ])
+    
+    setAssignLoading(false)
+  }
+
+  // 保存分配
+  const handleSaveAssignment = async () => {
+    if (!assigningProvider) return
+
+    try {
+      setAssignLoading(true)
+      const response = await fetch(`/api/proxy-providers/${assigningProvider.id}/users`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds: assignedUserIds }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || '保存失败')
+      }
+
+      message.success('分配保存成功')
+      setAssignModalVisible(false)
+      fetchProviders()
+    } catch (error: any) {
+      message.error(error.message || '保存分配失败')
+    } finally {
+      setAssignLoading(false)
+    }
+  }
+
+  // Transfer 组件的数据源
+  const transferDataSource = allUsers.map(user => ({
+    key: user.id,
+    title: user.name,
+    description: user.email,
+    role: user.role,
+  }))
+
+  // Transfer 组件变化处理
+  const handleTransferChange: TransferProps['onChange'] = (newTargetKeys) => {
+    setAssignedUserIds(newTargetKeys as string[])
   }
 
   const handleAdd = () => {
@@ -213,6 +330,17 @@ export default function ProxyManagement() {
       ) : '-',
     },
     {
+      title: '已分配用户',
+      dataIndex: 'assignedUserCount',
+      key: 'assignedUserCount',
+      width: 120,
+      render: (count: number) => (
+        <Tag color={count > 0 ? 'blue' : 'default'}>
+          {count > 0 ? `${count} 人` : '未分配'}
+        </Tag>
+      ),
+    },
+    {
       title: '状态',
       dataIndex: 'enabled',
       key: 'enabled',
@@ -226,8 +354,16 @@ export default function ProxyManagement() {
     {
       title: '操作',
       key: 'action',
+      width: 280,
       render: (_, record) => (
         <Space size="small">
+          <Button
+            type="link"
+            icon={<TeamOutlined />}
+            onClick={() => handleAssign(record)}
+          >
+            分配
+          </Button>
           <Button
             type="link"
             icon={<ApiOutlined />}
@@ -399,6 +535,52 @@ export default function ProxyManagement() {
             <Switch />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 分配用户弹窗 */}
+      <Modal
+        title={`分配用户 - ${assigningProvider?.name || ''}`}
+        open={assignModalVisible}
+        onOk={handleSaveAssignment}
+        onCancel={() => setAssignModalVisible(false)}
+        width={700}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={assignLoading}
+      >
+        <div className="py-4">
+          <p className="text-gray-500 mb-4">
+            选择可以使用此代理供应商的用户。<span className="text-orange-500 font-medium">未分配任何用户时，该代理供应商将不可用。</span>
+          </p>
+          <Transfer
+            dataSource={transferDataSource}
+            titles={['可选用户', '已分配用户']}
+            targetKeys={assignedUserIds}
+            onChange={handleTransferChange}
+            render={(item) => (
+              <span>
+                {item.title}
+                <span className="text-gray-400 text-xs ml-2">
+                  ({item.description})
+                </span>
+              </span>
+            )}
+            listStyle={{
+              width: 300,
+              height: 400,
+            }}
+            showSearch
+            filterOption={(inputValue, option) =>
+              option.title.toLowerCase().includes(inputValue.toLowerCase()) ||
+              option.description.toLowerCase().includes(inputValue.toLowerCase())
+            }
+            locale={{
+              itemUnit: '人',
+              itemsUnit: '人',
+              searchPlaceholder: '搜索用户',
+            }}
+          />
+        </div>
       </Modal>
     </div>
   )

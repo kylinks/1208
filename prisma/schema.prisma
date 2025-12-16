@@ -10,24 +10,26 @@ datasource db {
 }
 
 model User {
-  id               String         @id @default(uuid())
+  id               String              @id @default(uuid())
   /// 用户邮箱，用于登录
-  email            String         @unique
+  email            String              @unique
   /// 加密后的密码
   password         String
   /// 用户姓名
-  name             String         @db.VarChar(100)
+  name             String              @db.VarChar(100)
   /// 角色：employee=员工，admin=管理员
-  role             UserRole       @default(employee)
+  role             UserRole            @default(employee)
   /// 租户ID，用于多租户数据隔离
   tenantId         String
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
   mccAccounts      MccAccount[]
   cidAccounts      CidAccount[]
   campaigns        Campaign[]
   monitoringLogs   MonitoringLog[]
   systemConfigLogs SystemConfig[]
+  /// 分配的代理供应商关联
+  assignedProxies  ProxyProviderUser[]
 
   @@index([tenantId])
   @@map("User")
@@ -196,32 +198,54 @@ model AffiliateConfig {
 }
 
 model ProxyProvider {
-  id             String          @id @default(uuid())
+  id             String              @id @default(uuid())
   /// 供应商名称
-  name           String          @db.VarChar(100)
+  name           String              @db.VarChar(100)
   /// 优先级（数字越小优先级越高）
-  priority       Int             @default(0)
+  priority       Int                 @default(0)
   /// 是否启用
-  enabled        Boolean         @default(true)
+  enabled        Boolean             @default(true)
   /// 成功率（百分比）
-  successRate    Decimal?        @db.Decimal(5, 2)
+  successRate    Decimal?            @db.Decimal(5, 2)
   /// 最后一次失败时间
   lastFailedAt   DateTime?
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
   /// 认证密码（加密存储）
-  password       String          @db.Text
+  password       String              @db.Text
   /// 代理服务器地址
-  proxyHost      String          @db.VarChar(500)
+  proxyHost      String              @db.VarChar(500)
   /// 代理服务器端口
-  proxyPort      Int             @default(8080)
+  proxyPort      Int                 @default(8080)
   /// 认证用户名（支持国家代码占位符，如：user-country-{country}）
-  username       String          @db.VarChar(200)
+  username       String              @db.VarChar(200)
   usedProxyIps   UsedProxyIp[]
   monitoringLogs MonitoringLog[]
+  /// 分配的用户关联
+  assignedUsers  ProxyProviderUser[]
 
   @@index([enabled, priority])
   @@map("ProxyProvider")
+}
+
+model ProxyProviderUser {
+  id          String        @id @default(uuid())
+  /// 代理供应商ID
+  providerId  String
+  /// 用户ID
+  userId      String
+  /// 分配时间
+  assignedAt  DateTime      @default(now())
+  /// 分配者ID
+  assignedBy  String?
+
+  provider    ProxyProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, userId])
+  @@index([userId])
+  @@index([providerId])
+  @@map("ProxyProviderUser")
 }
 
 model UsedProxyIp {

@@ -25,8 +25,12 @@ import {
   SyncOutlined,
   CheckCircleOutlined,
   SearchOutlined,
+  CloudServerOutlined,
+  TeamOutlined,
+  StopOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import { OverviewKpiCard } from '../components/OverviewKpiCard'
 
 const { Text } = Typography
 
@@ -364,44 +368,67 @@ export default function MccManagement() {
       </div>
 
       {/* 统计卡片 */}
-      <Row gutter={16} className="mb-6">
-        <Col span={6}>
-          <Card>
-            <Statistic
-              title="MCC 账号总数"
-              value={stats.totalMcc}
-              valueStyle={{ color: '#1890ff' }}
-            />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic
-              title="所有 CID"
-              value={stats.totalCids}
-              valueStyle={{ color: '#1890ff' }}
-            />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic
-              title="有效 CID"
-              value={stats.activeCids}
-              valueStyle={{ color: '#52c41a' }}
-            />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic
-              title="规避 CID"
-              value={stats.suspendedCids}
-              valueStyle={{ color: '#faad14' }}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <OverviewKpiCard
+          title="MCC 账号总数"
+          icon={<CloudServerOutlined style={{ fontSize: 18 }} />}
+          value={<span className="tabular-nums">{stats.totalMcc.toLocaleString()}</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-orange-50',
+            border: 'border-orange-200',
+            titleText: 'text-orange-700',
+            valueText: 'text-orange-600',
+            iconBg: 'bg-orange-100',
+            iconText: 'text-orange-700',
+          }}
+        />
+
+        <OverviewKpiCard
+          title="所有 CID"
+          icon={<TeamOutlined style={{ fontSize: 18 }} />}
+          value={<span className="tabular-nums">{stats.totalCids.toLocaleString()}</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-sky-50',
+            border: 'border-sky-200',
+            titleText: 'text-sky-700',
+            valueText: 'text-sky-600',
+            iconBg: 'bg-sky-100',
+            iconText: 'text-sky-700',
+          }}
+        />
+
+        <OverviewKpiCard
+          title="有效 CID"
+          icon={<CheckCircleOutlined style={{ fontSize: 18 }} />}
+          value={<span className="tabular-nums">{stats.activeCids.toLocaleString()}</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-emerald-50',
+            border: 'border-emerald-200',
+            titleText: 'text-emerald-700',
+            valueText: 'text-emerald-600',
+            iconBg: 'bg-emerald-100',
+            iconText: 'text-emerald-700',
+          }}
+        />
+
+        <OverviewKpiCard
+          title="规避 CID"
+          icon={<StopOutlined style={{ fontSize: 18 }} />}
+          value={<span className="tabular-nums">{stats.suspendedCids.toLocaleString()}</span>}
+          loading={loading}
+          theme={{
+            bg: 'bg-violet-50',
+            border: 'border-violet-200',
+            titleText: 'text-violet-700',
+            valueText: 'text-violet-600',
+            iconBg: 'bg-violet-100',
+            iconText: 'text-violet-700',
+          }}
+        />
+      </div>
 
       {/* MCC 列表表格 */}
       <Table

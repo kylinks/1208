@@ -1,6 +1,6 @@
 'use client'
 
-import { Layout, Menu, theme, Dropdown, Avatar, Space, message, Modal } from 'antd'
+import { Layout, Menu, theme, message, Modal, Tooltip } from 'antd'
 import { usePathname, useRouter } from 'next/navigation'
 import { useSession, signOut } from 'next-auth/react'
 import { useEffect, useState } from 'react'
@@ -17,6 +17,7 @@ import {
   ExclamationCircleOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  CopyOutlined,
 } from '@ant-design/icons'
 import { MonitorProvider, useMonitor } from './MonitorContext'
 
@@ -139,22 +140,20 @@ function ConsoleLayoutInner({
     }
   }
 
-  const userMenuItems = [
-    {
-      key: 'profile',
-      icon: <UserOutlined />,
-      label: '个人信息',
-    },
-    {
-      type: 'divider' as const,
-    },
-    {
-      key: 'logout',
-      icon: <LogoutOutlined />,
-      label: '退出登录',
-      onClick: handleLogout,
-    },
-  ]
+  const displayName = session.user?.name || '未命名用户'
+  const displayEmail = session.user?.email || ''
+
+  const copyEmail = async () => {
+    if (!displayEmail) return
+    try {
+      await navigator.clipboard.writeText(displayEmail)
+      message.success('邮箱已复制')
+    } catch {
+      message.error('复制失败')
+    }
+  }
+
+  const toggleSider = () => setCollapsed((v) => !v)
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -172,22 +171,69 @@ function ConsoleLayoutInner({
           bottom: 0,
         }}
       >
-        <div className="flex items-center justify-center h-16 text-white text-lg font-bold">
-          {collapsed ? '换链' : '自动换链接系统'}
-        </div>
-        <Menu
-          theme="dark"
-          mode="inline"
-          selectedKeys={[pathname]}
-          items={menuItems}
-          onClick={handleMenuClick}
-        />
-        {/* 折叠切换按钮 */}
-        <div
-          className="absolute bottom-4 left-0 right-0 flex justify-center cursor-pointer text-white/70 hover:text-white transition-colors"
-          onClick={() => setCollapsed(!collapsed)}
-        >
-          {collapsed ? <MenuUnfoldOutlined style={{ fontSize: 18 }} /> : <MenuFoldOutlined style={{ fontSize: 18 }} />}
+        <div className="flex flex-col h-full">
+          {/* 品牌区 */}
+          <div className="flex items-center justify-center h-16 text-white text-lg font-bold">
+            {collapsed ? '换链' : '自动换链接系统'}
+          </div>
+
+          {/* 用户信息区（对齐截图：头像/姓名/邮箱） */}
+          <div className={`px-4 pb-4 ${collapsed ? 'px-2' : ''}`}>
+            <div className={`flex items-center ${collapsed ? 'justify-center' : 'gap-3'}`}>
+              <Tooltip title={collapsed ? '展开侧边栏' : '折叠侧边栏'}>
+                <div
+                  className="w-9 h-9 rounded-full flex items-center justify-center cursor-pointer text-white/80 hover:text-white hover:bg-white/10 transition-colors"
+                  onClick={toggleSider}
+                  aria-label="toggle-sider-from-user"
+                >
+                  {collapsed ? <MenuUnfoldOutlined style={{ fontSize: 18 }} /> : <MenuFoldOutlined style={{ fontSize: 18 }} />}
+                </div>
+              </Tooltip>
+              {!collapsed && (
+                <div className="min-w-0 flex-1">
+                  <div className="text-white text-sm font-medium truncate">{displayName}</div>
+                  <div className="flex items-center gap-2 text-white/60 text-xs">
+                    <span className="truncate">{displayEmail}</span>
+                    {displayEmail && (
+                      <Tooltip title="复制邮箱">
+                        <span
+                          className="cursor-pointer text-white/50 hover:text-white/80"
+                          onClick={copyEmail}
+                          aria-label="copy-email"
+                        >
+                          <CopyOutlined />
+                        </span>
+                      </Tooltip>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 主菜单 */}
+          <div className="flex-1 overflow-auto">
+            <Menu
+              theme="dark"
+              mode="inline"
+              selectedKeys={[pathname]}
+              items={menuItems}
+              onClick={handleMenuClick}
+            />
+          </div>
+
+          {/* 底部操作区（退出登录/折叠） */}
+          <div className="border-t border-white/10 p-2">
+            <div
+              className={`flex items-center rounded-md cursor-pointer text-white/80 hover:text-white hover:bg-white/10 transition-colors ${
+                collapsed ? 'justify-center px-2 py-2' : 'gap-3 px-3 py-2'
+              }`}
+              onClick={handleLogout}
+            >
+              <LogoutOutlined />
+              {!collapsed && <span className="text-sm">退出登录</span>}
+            </div>
+          </div>
         </div>
       </Sider>
       <Layout style={{ marginLeft: collapsed ? 80 : 200, transition: 'margin-left 0.2s' }}>
@@ -196,17 +242,9 @@ function ConsoleLayoutInner({
             <h1 className="text-xl font-semibold m-0">
               KyLinks自动换链接系统
             </h1>
-            <Dropdown menu={{ items: userMenuItems }} placement="bottomRight">
-              <Space className="cursor-pointer">
-                <Avatar icon={<UserOutlined />} />
-                <span className="text-sm">
-                  {session.user?.name || session.user?.email}
-                </span>
-                <span className="text-xs text-gray-500">
-                  ({session.user?.role === 'admin' ? '管理员' : '员工'})
-                </span>
-              </Space>
-            </Dropdown>
+            <div className="text-xs text-gray-500">
+              {session.user?.role === 'admin' ? '管理员' : '员工'}
+            </div>
           </div>
         </Header>
         <Content style={{ margin: '24px 16px 0' }}>

@@ -33,12 +33,248 @@ import { ProxyAgent, fetch as undiciFetch } from 'undici'
 const CONCURRENCY_LIMIT = 10 // 同时处理的广告系列数量
 const IP_CHECK_TIMEOUT = 8000 // IP检查超时时间（毫秒）
 const REDIRECT_TIMEOUT = 15000 // 重定向超时时间（毫秒）
+const PROXY_CONNECT_TIMEOUT = 10000 // 代理连接超时时间（毫秒）
+const PROXY_RETRY_COUNT = 3 // 单个供应商重试次数
+const PROXY_RETRY_DELAY_BASE = 1000 // 重试基础延迟（毫秒）
 
 // ============== 缓存的共享数据类型 ==============
 interface SharedData {
   providers: any[]
   maxRedirects: number
   usedIpsByampaign: Map<string, Set<string>> // campaignId -> Set<ip>
+}
+
+/**
+ * 对指定 userId 执行一次“一键启动/监控”任务（可被 cron 复用）
+ * - 不依赖 next-auth session
+ * - 返回结构与 API 响应 data 基本一致
+ */
+export async function runOneClickStartForUser(userId: string) {
+  const startTime = Date.now()
+
+  console.log(`🚀 一键启动开始... userId=${userId}`)
+
+  // 获取所有启用的广告系列（带联盟链接配置）
+  const campaigns = await prisma.campaign.findMany({
+    where: {
+      userId,
+      deletedAt: null,
+      enabled: true,
+      affiliateConfigs: {
+        some: {
+          deletedAt: null,
+          enabled: true,
+          affiliateLink: { not: '' },
+        },
+      },
+    },
+    include: {
+      cidAccount: {
+        select: {
+          cid: true,
+          name: true,
+          mccAccount: {
+            select: {
+              mccId: true,
+              name: true,
+            },
+          },
+        },
+      },
+      affiliateConfigs: {
+        where: {
+          deletedAt: null,
+          enabled: true,
+          affiliateLink: { not: '' },
+        },
+        orderBy: { priority: 'asc' },
+        take: 1,
+      },
+    },
+  })
+
+  if (campaigns.length === 0) {
+    return {
+      processed: 0,
+      updated: 0,
+      skipped: 0,
+      errors: 0,
+      results: [],
+      executedAt: new Date().toISOString(),
+      duration: Date.now() - startTime,
+      message: '没有启用的广告系列',
+    }
+  }
+
+  console.log(`📋 找到 ${campaigns.length} 个广告系列 userId=${userId}`)
+
+  // 预加载共享数据（一次性查询，只获取分配给当前用户的代理供应商）
+  const campaignIds = campaigns.map(c => c.id)
+  const sharedData = await preloadSharedData(campaignIds, userId)
+  console.log(`📦 预加载完成: ${sharedData.providers.length} 个代理供应商（已分配给当前用户）, 最大跳转 ${sharedData.maxRedirects} 次`)
+
+  // 按 MCC 分组获取点击数
+  const googleAdsService = getGoogleAdsService()
+  const mccGroups = new Map<string, typeof campaigns>()
+
+  for (const campaign of campaigns) {
+    const mccId = campaign.cidAccount.mccAccount.mccId
+    const group = mccGroups.get(mccId) || []
+    group.push(campaign)
+    mccGroups.set(mccId, group)
+  }
+
+  // 并行获取各MCC的今日点击数
+  const clicksMap = new Map<string, number>()
+  const mccPromises = Array.from(mccGroups.entries()).map(async ([mccId, mccCampaigns]) => {
+    const campaignInfos = mccCampaigns.map(c => ({
+      cidId: c.cidAccount.cid,
+      campaignId: c.campaignId,
+    }))
+
+    try {
+      const batchClicks = await googleAdsService.getBatchCampaignClicks(mccId, campaignInfos)
+      for (const [campaignId, clicks] of batchClicks) {
+        clicksMap.set(campaignId, clicks)
+      }
+    } catch (error) {
+      console.error(`获取 MCC ${mccId} 点击数失败:`, error)
+    }
+  })
+
+  await Promise.all(mccPromises)
+  console.log(`📊 获取点击数完成，耗时 ${Date.now() - startTime}ms userId=${userId}`)
+
+  // 并行处理广告系列（使用并发控制）
+  const processResults = await runWithConcurrencyLimit<typeof campaigns[number], ProcessResult>(
+    campaigns,
+    CONCURRENCY_LIMIT,
+    async (campaign) => {
+      const todayClicks = clicksMap.get(campaign.campaignId) || 0
+      return processSingleCampaign(
+        campaign as CampaignWithConfig,
+        todayClicks,
+        sharedData,
+        googleAdsService
+      )
+    }
+  )
+
+  // 统计结果
+  let processed = 0
+  let updated = 0
+  let skipped = 0
+  let errors = 0
+  const results: ProcessResult[] = []
+
+  for (const result of processResults) {
+    processed++
+    if (result.status === 'updated') {
+      updated++
+    } else if (result.status === 'skipped') {
+      skipped++
+    } else if (result.status === 'error') {
+      errors++
+    }
+    results.push(result)
+  }
+
+  const duration = Date.now() - startTime
+  console.log(`✅ 一键启动完成 userId=${userId}，总耗时 ${duration}ms，处理 ${processed} 个，更新 ${updated} 个，跳过 ${skipped} 个，错误 ${errors} 个`)
+
+  // 获取当前监控间隔配置
+  let intervalMinutes = 5 // 默认值
+  try {
+    const intervalConfig = await prisma.systemConfig.findUnique({
+      where: { key: 'cronInterval' }
+    })
+    if (intervalConfig) {
+      intervalMinutes = parseInt(intervalConfig.value) || 5
+    }
+  } catch (e) {
+    console.warn('获取监控间隔配置失败，使用默认值')
+  }
+
+  // 创建批次汇总日志（每次监控周期只生成一条日志）
+  const batchLogStatus = errors > 0 ? 'failed' : (updated > 0 ? 'success' : 'skipped')
+
+  // 构建详情数组，包含每个广告系列的处理结果
+  const logDetails = results.map(r => ({
+    campaignId: r.campaignId,
+    campaignName: r.campaignName,
+    status: r.status,
+    todayClicks: r.todayClicks,
+    lastClicks: r.lastClicks,
+    newClicks: r.newClicks,
+    newLink: r.newLink,
+    proxyIp: r.proxyIp,
+    googleAdsUpdated: r.googleAdsUpdated,
+    googleAdsError: r.googleAdsError,
+    reason: r.reason,
+    error: r.error,
+  }))
+
+  // 为每个成功更新的广告系列创建单独的监控日志（用于统计换链次数）
+  const successResults = results.filter(r => r.status === 'updated')
+  if (successResults.length > 0) {
+    const now = new Date()
+    const singleLogPromises = successResults.map(r => {
+      const campaign = campaigns.find(c => c.campaignId === r.campaignId)
+      return prisma.monitoringLog.create({
+        data: {
+          userId,
+          campaignId: campaign?.id || null,
+          triggeredAt: now,
+          todayClicks: r.todayClicks || 0,
+          lastClicks: r.lastClicks || 0,
+          newClicks: r.newClicks || 0,
+          proxyIp: r.proxyIp || null,
+          affiliateLink: r.affiliateLink || campaign?.affiliateConfigs?.[0]?.affiliateLink || null,
+          // 记录最终落地页 URL（用于日志详情展示/排查），避免误写成 suffix
+          finalUrl: r.finalUrl || null,
+          status: 'success',
+          executionTime: duration,
+          isBatchLog: false,
+        },
+      })
+    })
+    await Promise.all(singleLogPromises)
+    console.log(`📝 已创建 ${successResults.length} 条单独监控日志 userId=${userId}`)
+  }
+
+  // 创建批次汇总日志（每次监控周期只生成一条日志）
+  await prisma.monitoringLog.create({
+    data: {
+      userId,
+      triggeredAt: new Date(),
+      status: batchLogStatus,
+      executionTime: duration,
+      isBatchLog: true,
+      processed: processed,
+      updated: updated,
+      skipped: skipped,
+      errors: errors,
+      details: logDetails,
+      intervalMinutes: intervalMinutes,
+      // 批次日志不关联单个广告系列
+      campaignId: null,
+      providerId: null,
+    },
+  })
+
+  console.log(`📝 已创建批次监控日志，状态: ${batchLogStatus} userId=${userId}`)
+
+  return {
+    processed,
+    updated,
+    skipped,
+    errors,
+    results,
+    executedAt: new Date().toISOString(),
+    duration,
+    intervalMinutes,
+    batchLogStatus,
+  }
 }
 
 /**
@@ -146,15 +382,25 @@ function extractUrlSuffix(url: string): string {
 
 /**
  * 预加载所有共享数据（一次性查询，避免重复）
+ * @param campaignIds 广告系列ID列表
+ * @param userId 当前用户ID（用于筛选分配给该用户的代理供应商）
  */
-async function preloadSharedData(campaignIds: string[]): Promise<SharedData> {
+async function preloadSharedData(campaignIds: string[], userId: string): Promise<SharedData> {
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
   
   // 并行查询所有共享数据
   const [providers, configResult, usedIpsResult] = await Promise.all([
-    // 1. 获取代理供应商
+    // 1. 获取代理供应商（只获取分配给当前用户的，未分配则不可用）
     prisma.proxyProvider.findMany({
-      where: { enabled: true },
+      where: { 
+        enabled: true,
+        // 必须分配给当前用户才能使用
+        assignedUsers: {
+          some: {
+            userId: userId
+          }
+        }
+      },
       orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }]
     }),
     // 2. 获取系统配置
@@ -188,7 +434,68 @@ async function preloadSharedData(campaignIds: string[]): Promise<SharedData> {
 }
 
 /**
+ * 延迟函数
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * 带重试的代理IP获取
+ */
+async function fetchProxyIpWithRetry(
+  proxyAgent: InstanceType<typeof ProxyAgent>,
+  retryCount: number = 0
+): Promise<{ success: boolean; ip?: string; error?: string }> {
+  const ipCheckServices = [
+    { url: 'http://ip-api.com/json', parser: (data: any) => data.query },
+    { url: 'http://httpbin.org/ip', parser: (data: any) => data.origin },
+    { url: 'http://api.ipify.org?format=json', parser: (data: any) => data.ip },
+  ]
+
+  for (const service of ipCheckServices) {
+    try {
+      const ipResponse = await undiciFetch(service.url, {
+        method: 'GET',
+        dispatcher: proxyAgent,
+        signal: AbortSignal.timeout(IP_CHECK_TIMEOUT)
+      })
+      if (ipResponse.ok) {
+        const ipData = await ipResponse.json() as any
+        const ip = service.parser(ipData)
+        if (ip) {
+          return { success: true, ip }
+        }
+      }
+    } catch (e: any) {
+      const errorMsg = e.cause?.message || e.message || '未知错误'
+      console.warn(`IP查询服务 ${service.url} 失败:`, errorMsg)
+      
+      // 判断是否需要重试（连接失败、超时等）
+      const isRetryableError = 
+        errorMsg.includes('fetch failed') ||
+        errorMsg.includes('ETIMEDOUT') ||
+        errorMsg.includes('ECONNREFUSED') ||
+        errorMsg.includes('ECONNRESET') ||
+        errorMsg.includes('timeout')
+      
+      if (isRetryableError && retryCount < PROXY_RETRY_COUNT) {
+        const delayMs = PROXY_RETRY_DELAY_BASE * Math.pow(2, retryCount)
+        console.log(`⏳ 代理连接失败，${delayMs / 1000} 秒后重试... (第 ${retryCount + 1}/${PROXY_RETRY_COUNT} 次)`)
+        await delay(delayMs)
+        return fetchProxyIpWithRetry(proxyAgent, retryCount + 1)
+      }
+      
+      continue
+    }
+  }
+
+  return { success: false, error: '所有IP查询服务均失败' }
+}
+
+/**
  * 验证联盟链接并获取最终URL和代理IP（优化版本，使用预加载数据）
+ * 支持供应商轮换和连接重试
  */
 async function verifyAffiliateLinkOptimized(
   affiliateLink: string,
@@ -213,66 +520,56 @@ async function verifyAffiliateLinkOptimized(
     }
 
     const usedIpSet = usedIpsByampaign.get(campaignId) || new Set()
+    const providerErrors: string[] = [] // 记录每个供应商的错误
 
-    // 尝试使用代理获取唯一IP
-    let attempts = 0
-    const maxAttempts = 5 // 最多尝试5次获取不同IP
-    let lastError: string | null = null
+    // 遍历所有供应商（供应商轮换）
+    for (let providerIndex = 0; providerIndex < providers.length; providerIndex++) {
+      const provider = providers[providerIndex]
+      console.log(`🔌 尝试供应商 ${providerIndex + 1}/${providers.length}: ${provider.name}`)
 
-    while (attempts < maxAttempts) {
-      attempts++
-      const provider = providers[0]
-      
-      const usernameReplaced = replacePlaceholders(provider.username, countryCode)
-      const passwordReplaced = replacePlaceholders(provider.password, countryCode)
-      
-      const proxyUrl = `http://${encodeURIComponent(usernameReplaced.result)}:${encodeURIComponent(passwordReplaced.result)}@${provider.proxyHost}:${provider.proxyPort}`
-      
-      console.log(`🔄 尝试第 ${attempts} 次，国家: ${countryCode}`)
-      
-      const proxyAgent = new ProxyAgent({
-        uri: proxyUrl,
-        requestTls: { rejectUnauthorized: false }
-      })
+      // 每个供应商最多尝试获取不同IP的次数
+      const maxIpAttempts = 5
+      let lastProviderError: string | null = null
 
-      // 获取实际代理IP - 使用更快的超时
-      let actualProxyIp = ''
-      let ipFetchSuccess = false
-      const ipCheckServices = [
-        { url: 'http://ip-api.com/json', parser: (data: any) => data.query },
-        { url: 'http://httpbin.org/ip', parser: (data: any) => data.origin },
-        { url: 'http://api.ipify.org?format=json', parser: (data: any) => data.ip },
-      ]
-      
-      for (const service of ipCheckServices) {
-        try {
-          const ipResponse = await undiciFetch(service.url, {
-            method: 'GET',
-            dispatcher: proxyAgent,
-            signal: AbortSignal.timeout(IP_CHECK_TIMEOUT)
-          })
-          if (ipResponse.ok) {
-            const ipData = await ipResponse.json() as any
-            const ip = service.parser(ipData)
-            if (ip) {
-              actualProxyIp = ip
-              ipFetchSuccess = true
-              console.log(`✅ 获取到代理IP: ${actualProxyIp}`)
-              break
-            }
+      for (let ipAttempt = 0; ipAttempt < maxIpAttempts; ipAttempt++) {
+        const usernameReplaced = replacePlaceholders(provider.username, countryCode)
+        const passwordReplaced = replacePlaceholders(provider.password, countryCode)
+        
+        const proxyUrl = `http://${encodeURIComponent(usernameReplaced.result)}:${encodeURIComponent(passwordReplaced.result)}@${provider.proxyHost}:${provider.proxyPort}`
+        
+        console.log(`🔄 供应商 ${provider.name} 第 ${ipAttempt + 1} 次尝试，国家: ${countryCode}`)
+        
+        const proxyAgent = new ProxyAgent({
+          uri: proxyUrl,
+          requestTls: { rejectUnauthorized: false },
+          connect: { timeout: PROXY_CONNECT_TIMEOUT }
+        })
+
+        // 获取实际代理IP（带重试）
+        const ipResult = await fetchProxyIpWithRetry(proxyAgent)
+        
+        if (!ipResult.success) {
+          lastProviderError = ipResult.error || '无法获取代理IP'
+          console.warn(`⚠️ 供应商 ${provider.name} 第 ${ipAttempt + 1} 次尝试失败: ${lastProviderError}`)
+          
+          // 如果是连接级别的错误，直接跳到下一个供应商
+          if (lastProviderError.includes('fetch failed') || 
+              lastProviderError.includes('ETIMEDOUT') ||
+              lastProviderError.includes('ECONNREFUSED')) {
+            console.log(`❌ 供应商 ${provider.name} 连接失败，尝试下一个供应商`)
+            break
           }
-        } catch (e: any) {
-          console.warn(`IP查询服务 ${service.url} 失败:`, e.message)
-          lastError = `代理连接失败: ${e.message}`
           continue
         }
-      }
 
-      // 如果无法获取代理IP，继续尝试
-      if (!ipFetchSuccess) {
-        console.warn(`⚠️ 第 ${attempts} 次尝试无法获取代理IP`)
-        continue
-      }
+        const actualProxyIp = ipResult.ip!
+        console.log(`✅ 获取到代理IP: ${actualProxyIp}`)
+
+        // 检查IP是否已被使用
+        if (usedIpSet.has(actualProxyIp)) {
+          console.log(`⚠️ IP ${actualProxyIp} 在24小时内已被使用，尝试获取新IP...`)
+          continue
+        }
 
       // 检查IP是否已被使用
       if (usedIpSet.has(actualProxyIp)) {
@@ -355,7 +652,7 @@ async function verifyAffiliateLinkOptimized(
           
           // 如果是第一次请求就失败，可能是代理问题
           if (i === 0) {
-            lastError = `代理请求失败 (${countryCode}): ${errorMsg}`
+            lastProviderError = `代理请求失败 (${countryCode}): ${errorMsg}`
           }
           break
         }
@@ -392,15 +689,26 @@ async function verifyAffiliateLinkOptimized(
         }
       }
 
-      // 如果有重定向错误，记录下来
-      if (redirectError) {
-        lastError = `链接验证失败 (${countryCode}): ${redirectError}`
-      } else {
-        lastError = `无法获取有效的最终URL (${countryCode})`
+        // 如果有重定向错误，记录下来
+        if (redirectError) {
+          lastProviderError = `链接验证失败 (${countryCode}): ${redirectError}`
+        } else {
+          lastProviderError = `无法获取有效的最终URL (${countryCode})`
+        }
+      }
+
+      // 记录当前供应商的错误
+      if (lastProviderError) {
+        providerErrors.push(`${provider.name}: ${lastProviderError}`)
       }
     }
 
-    return { success: false, error: lastError || '代理连接失败，请检查代理配置' }
+    // 所有供应商都失败了
+    const errorSummary = providerErrors.length > 0 
+      ? `所有代理供应商均失败:\n${providerErrors.join('\n')}`
+      : '代理连接失败，请检查代理配置'
+    
+    return { success: false, error: errorSummary }
   } catch (error: any) {
     console.error('验证联盟链接失败:', error)
     return { success: false, error: error.message }
@@ -451,6 +759,8 @@ interface ProcessResult {
   lastClicks?: number
   newClicks?: number
   newLink?: string
+  affiliateLink?: string
+  finalUrl?: string
   proxyIp?: string
   googleAdsUpdated?: boolean
   googleAdsError?: string
@@ -639,6 +949,8 @@ async function processSingleCampaign(
       lastClicks,
       newClicks: todayClicks - lastClicks,
       newLink: newLinkSuffix,
+      affiliateLink: affiliateConfig.affiliateLink,
+      finalUrl: verifyResult.finalUrl,
       proxyIp: verifyResult.proxyIp,
       googleAdsUpdated: googleAdsUpdateSuccess,
       googleAdsError: googleAdsError,
@@ -655,8 +967,6 @@ async function processSingleCampaign(
 }
 
 export async function POST(request: NextRequest) {
-  const startTime = Date.now()
-  
   try {
     // 验证用户登录
     const session = await getServerSession(authOptions)
@@ -666,234 +976,12 @@ export async function POST(request: NextRequest) {
         { status: 401 }
       )
     }
-
-    console.log('🚀 一键启动开始...')
-
-    // 获取所有启用的广告系列（带联盟链接配置）
-    const campaigns = await prisma.campaign.findMany({
-      where: {
-        userId: session.user.id,
-        deletedAt: null,
-        enabled: true,
-        affiliateConfigs: {
-          some: {
-            deletedAt: null,
-            enabled: true,
-            affiliateLink: { not: '' },
-          },
-        },
-      },
-      include: {
-        cidAccount: {
-          select: {
-            cid: true,
-            name: true,
-            mccAccount: {
-              select: {
-                mccId: true,
-                name: true,
-              },
-            },
-          },
-        },
-        affiliateConfigs: {
-          where: {
-            deletedAt: null,
-            enabled: true,
-            affiliateLink: { not: '' },
-          },
-          orderBy: { priority: 'asc' },
-          take: 1,
-        },
-      },
-    })
-
-    if (campaigns.length === 0) {
-      return NextResponse.json({
-        success: true,
-        data: {
-          processed: 0,
-          updated: 0,
-          skipped: 0,
-          errors: 0,
-          message: '没有启用的广告系列',
-          duration: Date.now() - startTime,
-        },
-      })
-    }
-
-    console.log(`📋 找到 ${campaigns.length} 个广告系列`)
-
-    // 预加载共享数据（一次性查询）
-    const campaignIds = campaigns.map(c => c.id)
-    const sharedData = await preloadSharedData(campaignIds)
-    console.log(`📦 预加载完成: ${sharedData.providers.length} 个代理供应商, 最大跳转 ${sharedData.maxRedirects} 次`)
-
-    // 按 MCC 分组获取点击数
-    const googleAdsService = getGoogleAdsService()
-    const mccGroups = new Map<string, typeof campaigns>()
-    
-    for (const campaign of campaigns) {
-      const mccId = campaign.cidAccount.mccAccount.mccId
-      const group = mccGroups.get(mccId) || []
-      group.push(campaign)
-      mccGroups.set(mccId, group)
-    }
-
-    // 并行获取各MCC的今日点击数
-    const clicksMap = new Map<string, number>()
-    const mccPromises = Array.from(mccGroups.entries()).map(async ([mccId, mccCampaigns]) => {
-      const campaignInfos = mccCampaigns.map(c => ({
-        cidId: c.cidAccount.cid,
-        campaignId: c.campaignId,
-      }))
-      
-      try {
-        const batchClicks = await googleAdsService.getBatchCampaignClicks(mccId, campaignInfos)
-        for (const [campaignId, clicks] of batchClicks) {
-          clicksMap.set(campaignId, clicks)
-        }
-      } catch (error) {
-        console.error(`获取 MCC ${mccId} 点击数失败:`, error)
-      }
-    })
-    
-    await Promise.all(mccPromises)
-    console.log(`📊 获取点击数完成，耗时 ${Date.now() - startTime}ms`)
-
-    // 并行处理广告系列（使用并发控制）
-    const processResults = await runWithConcurrencyLimit<typeof campaigns[number], ProcessResult>(
-      campaigns,
-      CONCURRENCY_LIMIT,
-      async (campaign) => {
-        const todayClicks = clicksMap.get(campaign.campaignId) || 0
-        return processSingleCampaign(
-          campaign as CampaignWithConfig,
-          todayClicks,
-          sharedData,
-          googleAdsService
-        )
-      }
-    )
-
-    // 统计结果
-    let processed = 0
-    let updated = 0
-    let skipped = 0
-    let errors = 0
-    const results: ProcessResult[] = []
-
-    for (const result of processResults) {
-      processed++
-      if (result.status === 'updated') {
-        updated++
-      } else if (result.status === 'skipped') {
-        skipped++
-      } else if (result.status === 'error') {
-        errors++
-      }
-      results.push(result)
-    }
-
-    const duration = Date.now() - startTime
-    console.log(`✅ 一键启动完成，总耗时 ${duration}ms，处理 ${processed} 个，更新 ${updated} 个，跳过 ${skipped} 个，错误 ${errors} 个`)
-
-    // 获取当前监控间隔配置
-    let intervalMinutes = 5 // 默认值
-    try {
-      const intervalConfig = await prisma.systemConfig.findUnique({
-        where: { key: 'cronInterval' }
-      })
-      if (intervalConfig) {
-        intervalMinutes = parseInt(intervalConfig.value) || 5
-      }
-    } catch (e) {
-      console.warn('获取监控间隔配置失败，使用默认值')
-    }
-
-    // 创建批次汇总日志（每次监控周期只生成一条日志）
-    const batchLogStatus = errors > 0 ? 'failed' : (updated > 0 ? 'success' : 'skipped')
-    
-    // 构建详情数组，包含每个广告系列的处理结果
-    const logDetails = results.map(r => ({
-      campaignId: r.campaignId,
-      campaignName: r.campaignName,
-      status: r.status,
-      todayClicks: r.todayClicks,
-      lastClicks: r.lastClicks,
-      newClicks: r.newClicks,
-      newLink: r.newLink,
-      proxyIp: r.proxyIp,
-      googleAdsUpdated: r.googleAdsUpdated,
-      googleAdsError: r.googleAdsError,
-      reason: r.reason,
-      error: r.error,
-    }))
-
-    // 为每个成功更新的广告系列创建单独的监控日志（用于统计换链次数）
-    const successResults = results.filter(r => r.status === 'updated')
-    if (successResults.length > 0) {
-      const now = new Date()
-      const singleLogPromises = successResults.map(r => {
-        const campaign = campaigns.find(c => c.campaignId === r.campaignId)
-        return prisma.monitoringLog.create({
-          data: {
-            userId: session.user.id,
-            campaignId: campaign?.id || null,
-            triggeredAt: now,
-            todayClicks: r.todayClicks || 0,
-            lastClicks: r.lastClicks || 0,
-            newClicks: r.newClicks || 0,
-            proxyIp: r.proxyIp || null,
-            finalUrl: r.newLink || null,
-            status: 'success',
-            executionTime: duration,
-            isBatchLog: false,
-          },
-        })
-      })
-      await Promise.all(singleLogPromises)
-      console.log(`📝 已创建 ${successResults.length} 条单独监控日志`)
-    }
-
-    // 创建批次汇总日志（每次监控周期只生成一条日志）
-    await prisma.monitoringLog.create({
-      data: {
-        userId: session.user.id,
-        triggeredAt: new Date(),
-        status: batchLogStatus,
-        executionTime: duration,
-        isBatchLog: true,
-        processed: processed,
-        updated: updated,
-        skipped: skipped,
-        errors: errors,
-        details: logDetails,
-        intervalMinutes: intervalMinutes,
-        // 批次日志不关联单个广告系列
-        campaignId: null,
-        providerId: null,
-      },
-    })
-
-    console.log(`📝 已创建批次监控日志，状态: ${batchLogStatus}`)
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        processed,
-        updated,
-        skipped,
-        errors,
-        results,
-        executedAt: new Date().toISOString(),
-        duration, // 添加耗时信息
-      },
-    })
+    const data = await runOneClickStartForUser(session.user.id)
+    return NextResponse.json({ success: true, data })
   } catch (error: any) {
     console.error('一键启动失败:', error)
     return NextResponse.json(
-      { success: false, error: error.message || '一键启动失败', duration: Date.now() - startTime },
+      { success: false, error: error.message || '一键启动失败' },
       { status: 500 }
     )
   }

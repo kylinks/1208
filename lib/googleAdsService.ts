@@ -64,6 +64,10 @@ class GoogleAdsService {
   private accessToken: string | null = null;
   private tokenExpiresAt: number = 0;
   private apiVersion: string = 'v22';
+  
+  // 重试配置（针对 Google Ads API 429 配额错误优化）
+  private maxRetries: number = 5; // 增加到 5 次
+  private baseRetryDelayMs: number = 10000; // 初始等待 10 秒（Google API 配额错误需要更长等待）
 
   constructor() {
     this.developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '';
@@ -75,6 +79,76 @@ class GoogleAdsService {
     if (!this.serviceAccountKeyPath) {
       throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY_PATH 环境变量未配置');
     }
+  }
+
+  /**
+   * 延迟函数
+   * @param ms - 延迟毫秒数
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 带重试机制的 fetch 请求（指数退避 + Retry-After 支持）
+   * @param url - 请求 URL
+   * @param options - fetch 选项
+   * @param retryCount - 当前重试次数
+   * @returns fetch 响应
+   */
+  private async fetchWithRetry(
+    url: string,
+    options: RequestInit,
+    retryCount: number = 0
+  ): Promise<Response> {
+    const response = await fetch(url, options);
+
+    // 需要重试的状态码：429 配额/限流、5xx 临时不可用
+    const shouldRetryStatus =
+      response.status === 429 ||
+      response.status === 500 ||
+      response.status === 503 ||
+      response.status === 504;
+
+    // 如果遇到可重试错误且还有重试次数
+    if (shouldRetryStatus && retryCount < this.maxRetries) {
+      // 优先使用 Retry-After 响应头（如果存在）
+      const retryAfterHeader = response.headers.get('Retry-After');
+      let delayMs: number;
+      
+      if (retryAfterHeader) {
+        // Retry-After 可能是秒数或日期
+        const retryAfterSeconds = parseInt(retryAfterHeader, 10);
+        if (!isNaN(retryAfterSeconds)) {
+          delayMs = retryAfterSeconds * 1000;
+        } else {
+          // 如果是日期格式，计算等待时间
+          const retryDate = new Date(retryAfterHeader);
+          delayMs = Math.max(retryDate.getTime() - Date.now(), this.baseRetryDelayMs);
+        }
+      } else {
+        // 使用指数退避: base * 2^n
+        delayMs = this.baseRetryDelayMs * Math.pow(2, retryCount);
+      }
+      
+      // 加入抖动（equal-jitter）：避免多请求在同一时刻一起重试造成“重试风暴”
+      // delay' = delay/2 + random(0, delay/2)
+      const half = Math.max(500, Math.floor(delayMs / 2));
+      delayMs = half + Math.floor(Math.random() * half);
+
+      // 限制最大等待时间为 2 分钟（验证场景不宜过久）
+      delayMs = Math.min(delayMs, 2 * 60 * 1000);
+      
+      console.log(
+        `⏳ Google Ads API 可重试错误 (${response.status})，${(delayMs / 1000).toFixed(0)} 秒后重试... ` +
+        `(第 ${retryCount + 1}/${this.maxRetries} 次)`
+      );
+      
+      await this.delay(delayMs);
+      return this.fetchWithRetry(url, options, retryCount + 1);
+    }
+
+    return response;
   }
 
   /**
@@ -227,7 +301,8 @@ class GoogleAdsService {
         hasToken: !!this.accessToken,
       });
 
-      const response = await fetch(apiUrl, {
+      // 使用带重试机制的 fetch（处理 429 配额限制）
+      const response = await this.fetchWithRetry(apiUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.accessToken}`,
@@ -273,6 +348,9 @@ class GoogleAdsService {
           // 详细的 400 错误信息
           const errorMsg = errorData?.error?.message || errorData?.message || '请求参数错误';
           throw new Error(`请求参数错误: ${errorMsg}`);
+        } else if (response.status === 429) {
+          // 429 错误已重试多次仍失败，给出友好提示
+          throw new Error('API 请求频率超限，请稍后再试（建议等待 1-2 分钟）');
         } else {
           const errorMsg = errorData?.error?.message || errorData?.message || response.statusText;
           throw new Error(`Google Ads API 请求失败 (${response.status}): ${errorMsg}`);

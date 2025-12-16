@@ -266,16 +266,57 @@ export async function DELETE(
       );
     }
 
-    // 使用事务同时软删除 MCC 和关联的 CID
+    // 使用事务同时软删除 MCC 及所有关联数据（CID、Campaign、AffiliateConfig）
     const now = new Date();
     const result = await prisma.$transaction(async (tx) => {
-      // 软删除 MCC
-      await tx.mccAccount.update({
-        where: { id },
-        data: { deletedAt: now },
+      // 1. 获取该 MCC 下所有 CID 的 ID
+      const cidAccounts = await tx.cidAccount.findMany({
+        where: {
+          mccAccountId: id,
+          deletedAt: null,
+        },
+        select: { id: true },
       });
+      const cidIds = cidAccounts.map(c => c.id);
 
-      // 软删除关联的 CID
+      let deletedCampaignsCount = 0;
+      let deletedAffiliatesCount = 0;
+
+      if (cidIds.length > 0) {
+        // 2. 获取这些 CID 下所有 Campaign 的 ID
+        const campaigns = await tx.campaign.findMany({
+          where: {
+            cidAccountId: { in: cidIds },
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        const campaignIds = campaigns.map(c => c.id);
+
+        if (campaignIds.length > 0) {
+          // 3. 软删除 AffiliateConfig（联盟配置）
+          const deletedAffiliates = await tx.affiliateConfig.updateMany({
+            where: {
+              campaignId: { in: campaignIds },
+              deletedAt: null,
+            },
+            data: { deletedAt: now },
+          });
+          deletedAffiliatesCount = deletedAffiliates.count;
+        }
+
+        // 4. 软删除 Campaign（广告系列）
+        const deletedCampaigns = await tx.campaign.updateMany({
+          where: {
+            cidAccountId: { in: cidIds },
+            deletedAt: null,
+          },
+          data: { deletedAt: now },
+        });
+        deletedCampaignsCount = deletedCampaigns.count;
+      }
+
+      // 5. 软删除 CID 账户
       const deletedCids = await tx.cidAccount.updateMany({
         where: {
           mccAccountId: id,
@@ -284,12 +325,27 @@ export async function DELETE(
         data: { deletedAt: now },
       });
 
-      return deletedCids.count;
+      // 6. 软删除 MCC 账号
+      await tx.mccAccount.update({
+        where: { id },
+        data: { deletedAt: now },
+      });
+
+      return {
+        cidCount: deletedCids.count,
+        campaignCount: deletedCampaignsCount,
+        affiliateCount: deletedAffiliatesCount,
+      };
     });
 
     return NextResponse.json({
       success: true,
-      message: `MCC 账号删除成功，同时删除了 ${result} 个关联的 CID 账户`,
+      message: `MCC 账号删除成功`,
+      data: {
+        deletedCids: result.cidCount,
+        deletedCampaigns: result.campaignCount,
+        deletedAffiliateConfigs: result.affiliateCount,
+      },
     });
   } catch (error: any) {
     console.error('删除 MCC 失败:', error);

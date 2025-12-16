@@ -179,7 +179,9 @@ export async function GET(request: NextRequest) {
         affiliateLink: affiliateConfig?.affiliateLink || '-',
         lastClicks: campaign.lastClicks,
         todayClicks: campaign.todayClicks,
-        originalLink: latestLog?.affiliateLink || null,
+        // “原链接”应展示当前记录的 Final URL（用于计算域名/后缀的数据源）
+        // 之前误用 latestLog.affiliateLink，导致该列经常为空
+        originalLink: finalUrl || null,
         checkTime: latestLog?.triggeredAt?.toISOString() || null,
         newLink: newLink,
         proxyIp: latestLog?.proxyIp || null,

@@ -8,6 +8,73 @@ import { authOptions } from '@/lib/auth'
 // 强制动态渲染，避免构建时静态生成
 export const dynamic = 'force-dynamic'
 
+// ============== 代理连接配置 ==============
+const IP_CHECK_TIMEOUT = 8000 // IP检查超时时间（毫秒）
+const REDIRECT_TIMEOUT = 15000 // 重定向超时时间（毫秒）
+const PROXY_CONNECT_TIMEOUT = 10000 // 代理连接超时时间（毫秒）
+const PROXY_RETRY_COUNT = 3 // 单个供应商重试次数
+const PROXY_RETRY_DELAY_BASE = 1000 // 重试基础延迟（毫秒）
+
+/**
+ * 延迟函数
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * 带重试的代理IP获取
+ */
+async function fetchProxyIpWithRetry(
+  proxyAgent: InstanceType<typeof ProxyAgent>,
+  retryCount: number = 0
+): Promise<{ success: boolean; ip?: string; error?: string }> {
+  const ipCheckServices = [
+    { url: 'http://ip-api.com/json', parser: (data: any) => data.query },
+    { url: 'http://httpbin.org/ip', parser: (data: any) => data.origin },
+    { url: 'http://api.ipify.org?format=json', parser: (data: any) => data.ip },
+  ]
+
+  for (const service of ipCheckServices) {
+    try {
+      const ipResponse = await undiciFetch(service.url, {
+        method: 'GET',
+        dispatcher: proxyAgent,
+        signal: AbortSignal.timeout(IP_CHECK_TIMEOUT)
+      })
+      if (ipResponse.ok) {
+        const ipData = await ipResponse.json() as any
+        const ip = service.parser(ipData)
+        if (ip) {
+          return { success: true, ip }
+        }
+      }
+    } catch (e: any) {
+      const errorMsg = e.cause?.message || e.message || '未知错误'
+      console.warn(`IP查询服务 ${service.url} 失败:`, errorMsg)
+      
+      // 判断是否需要重试（连接失败、超时等）
+      const isRetryableError = 
+        errorMsg.includes('fetch failed') ||
+        errorMsg.includes('ETIMEDOUT') ||
+        errorMsg.includes('ECONNREFUSED') ||
+        errorMsg.includes('ECONNRESET') ||
+        errorMsg.includes('timeout')
+      
+      if (isRetryableError && retryCount < PROXY_RETRY_COUNT) {
+        const delayMs = PROXY_RETRY_DELAY_BASE * Math.pow(2, retryCount)
+        console.log(`⏳ 代理连接失败，${delayMs / 1000} 秒后重试... (第 ${retryCount + 1}/${PROXY_RETRY_COUNT} 次)`)
+        await delay(delayMs)
+        return fetchProxyIpWithRetry(proxyAgent, retryCount + 1)
+      }
+      
+      continue
+    }
+  }
+
+  return { success: false, error: '所有IP查询服务均失败' }
+}
+
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ success: false, error: message }, { status })
 }
@@ -280,56 +347,61 @@ export async function POST(request: NextRequest) {
       } as VerifyResult)
     }
 
-    // 使用第一个可用的代理供应商
-    const provider = providers[0]
-    
-    // 替换用户名中的占位符
-    const usernameReplaced = replacePlaceholders(provider.username, countryCode)
-    const username = usernameReplaced.result
-    
-    // 替换密码中的占位符
-    const passwordReplaced = replacePlaceholders(provider.password, countryCode)
-    const password = passwordReplaced.result
+    // 供应商轮换：遍历所有供应商直到成功
+    let actualProxyIp = ''
+    let currentProvider = providers[0]
+    let proxyAgent: InstanceType<typeof ProxyAgent> | null = null
+    const providerErrors: string[] = []
 
-    // 构建代理URL（undici ProxyAgent 格式）
-    const proxyUrl = `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${provider.proxyHost}:${provider.proxyPort}`
-    
-    // 创建 undici ProxyAgent（支持账密认证）
-    const proxyAgent = new ProxyAgent({
-      uri: proxyUrl,
-      requestTls: {
-        rejectUnauthorized: false // 允许自签名证书
-      }
-    })
+    for (let providerIndex = 0; providerIndex < providers.length; providerIndex++) {
+      const provider = providers[providerIndex]
+      console.log(`🔌 尝试供应商 ${providerIndex + 1}/${providers.length}: ${provider.name}`)
 
-    // 获取实际的代理IP地址（通过代理访问IP查询服务）
-    // 使用多个备选服务，优先使用 HTTP 协议（避免 HTTPS 隧道认证问题）
-    let actualProxyIp = `${provider.proxyHost}:${provider.proxyPort}` // 默认值
-    const ipCheckServices = [
-      { url: 'http://ip-api.com/json', parser: (data: any) => data.query },
-      { url: 'http://httpbin.org/ip', parser: (data: any) => data.origin },
-      { url: 'http://api.ipify.org?format=json', parser: (data: any) => data.ip },
-    ]
-    
-    for (const service of ipCheckServices) {
-      try {
-        const ipResponse = await undiciFetch(service.url, {
-          method: 'GET',
-          dispatcher: proxyAgent,
-          signal: AbortSignal.timeout(8000) // 8秒超时
-        })
-        if (ipResponse.ok) {
-          const ipData = await ipResponse.json() as any
-          const ip = service.parser(ipData)
-          if (ip) {
-            actualProxyIp = ip
-            break // 成功获取到IP，退出循环
-          }
-        }
-      } catch (e) {
-        console.warn(`IP查询服务 ${service.url} 失败:`, (e as Error).message)
-        // 继续尝试下一个服务
+      // 替换用户名中的占位符
+      const usernameReplaced = replacePlaceholders(provider.username, countryCode)
+      const username = usernameReplaced.result
+      
+      // 替换密码中的占位符
+      const passwordReplaced = replacePlaceholders(provider.password, countryCode)
+      const password = passwordReplaced.result
+
+      // 构建代理URL（undici ProxyAgent 格式）
+      const proxyUrl = `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${provider.proxyHost}:${provider.proxyPort}`
+      
+      // 创建 undici ProxyAgent（支持账密认证）
+      proxyAgent = new ProxyAgent({
+        uri: proxyUrl,
+        requestTls: {
+          rejectUnauthorized: false // 允许自签名证书
+        },
+        connect: { timeout: PROXY_CONNECT_TIMEOUT }
+      })
+
+      // 获取实际的代理IP地址（带重试）
+      const ipResult = await fetchProxyIpWithRetry(proxyAgent)
+      
+      if (ipResult.success && ipResult.ip) {
+        actualProxyIp = ipResult.ip
+        currentProvider = provider
+        console.log(`✅ 供应商 ${provider.name} 连接成功，IP: ${actualProxyIp}`)
+        break
+      } else {
+        const errorMsg = ipResult.error || '无法获取代理IP'
+        console.warn(`❌ 供应商 ${provider.name} 连接失败: ${errorMsg}`)
+        providerErrors.push(`${provider.name}: ${errorMsg}`)
+        proxyAgent = null
       }
+    }
+
+    // 如果所有供应商都失败
+    if (!proxyAgent || !actualProxyIp) {
+      return NextResponse.json({
+        success: false,
+        error: `所有代理供应商连接失败:\n${providerErrors.join('\n')}`,
+        matched: false,
+        redirectChain: [],
+        totalRedirects: 0
+      } as VerifyResult)
     }
 
     // 重定向链
@@ -467,7 +539,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
           success: false,
           proxyIp: actualProxyIp,
-          proxyProvider: provider.name,
+          proxyProvider: currentProvider.name,
           redirectChain,
           finalUrl,
           finalDomain,
@@ -487,7 +559,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       proxyIp: actualProxyIp,
-      proxyProvider: provider.name,
+      proxyProvider: currentProvider.name,
       redirectChain,
       finalUrl,
       finalDomain,

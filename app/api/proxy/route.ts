@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAvailableProxy, cleanupOldProxyRecords } from '@/lib/proxyService'
+import { prisma } from '@/lib/prisma'
 
 // 强制动态渲染，避免构建时静态生成
 export const dynamic = 'force-dynamic'
@@ -24,13 +25,26 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const proxy = await getAvailableProxy(countryCode, campaignId)
+    // 通过 campaignId 获取所属用户ID
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      select: { userId: true }
+    })
+
+    if (!campaign) {
+      return NextResponse.json(
+        { error: '广告系列不存在' },
+        { status: 404 }
+      )
+    }
+
+    const proxy = await getAvailableProxy(countryCode, campaignId, campaign.userId)
 
     if (!proxy) {
       return NextResponse.json(
         { 
           error: '没有可用的代理',
-          message: `国家 ${countryCode} 的所有代理在24小时内都已被使用` 
+          message: `国家 ${countryCode} 没有分配给当前用户的可用代理，或所有代理在24小时内都已被使用` 
         },
         { status: 404 }
       )

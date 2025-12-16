@@ -12,9 +12,6 @@ import {
   Modal,
   Input,
   Card,
-  Row,
-  Col,
-  Statistic,
   message,
   Tooltip,
   Typography,
@@ -27,12 +24,11 @@ import {
   ReloadOutlined,
   EyeOutlined,
   FileTextOutlined,
-  RiseOutlined,
-  FallOutlined,
   ClockCircleOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table'
 import dayjs, { Dayjs } from 'dayjs'
+import { OverviewKpiCard } from '../components/OverviewKpiCard'
 
 const { RangePicker } = DatePicker
 const { Text, Paragraph } = Typography
@@ -401,73 +397,105 @@ export default function LogsManagement() {
 
   // 监控统计卡片
   const MonitorStatsCards = () => (
-    <Row gutter={[16, 16]} className="mb-4">
-      <Col xs={24} sm={12} md={6}>
-        <Card size="small" className="hover:shadow-md transition-shadow">
-          <Statistic
-            title={<span><FileTextOutlined className="mr-2" />监控批次</span>}
-            value={monitorStats?.totalCount || 0}
-            valueStyle={{ color: '#1890ff' }}
-            suffix="次"
-          />
-        </Card>
-      </Col>
-      <Col xs={24} sm={12} md={6}>
-        <Card size="small" className="hover:shadow-md transition-shadow">
-          <Statistic
-            title={<span><ClockCircleOutlined className="mr-2" />今日执行</span>}
-            value={monitorStats?.todayCount || 0}
-            valueStyle={{ color: '#52c41a' }}
-            suffix={
-              <>
-                次
-                {monitorStats && monitorStats.todayCount > monitorStats.yesterdayCount ? (
-                  <RiseOutlined className="text-green-500 text-sm ml-1" />
-                ) : monitorStats && monitorStats.todayCount < monitorStats.yesterdayCount ? (
-                  <FallOutlined className="text-red-500 text-sm ml-1" />
-                ) : null}
-              </>
-            }
-          />
-        </Card>
-      </Col>
-      <Col xs={24} sm={12} md={6}>
-        <Card size="small" className="hover:shadow-md transition-shadow">
-          <Statistic
-            title={<span><CheckCircleOutlined className="mr-2" />批次成功率</span>}
-            value={monitorStats?.successRate || 0}
-            suffix="%"
-            valueStyle={{ 
-              color: (monitorStats?.successRate || 0) >= 80 ? '#52c41a' : 
-                     (monitorStats?.successRate || 0) >= 60 ? '#faad14' : '#ff4d4f'
-            }}
-          />
-        </Card>
-      </Col>
-      <Col xs={24} sm={12} md={6}>
-        <Card size="small" className="hover:shadow-md transition-shadow">
-          <div className="text-xs text-gray-500 mb-2">广告系列处理统计</div>
-          <div className="flex justify-between">
-            <div>
-              <Text type="secondary" className="text-xs">处理</Text>
-              <div className="text-blue-500 font-semibold">{monitorStats?.campaignStats?.totalProcessed || 0}</div>
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+      <OverviewKpiCard
+        title="监控批次"
+        icon={<FileTextOutlined style={{ fontSize: 18 }} />}
+        value={
+          <>
+            <span className="tabular-nums">{(monitorStats?.totalCount || 0).toLocaleString()}</span>
+            <span className="ml-1 text-2xl sm:text-3xl font-bold opacity-80">次</span>
+          </>
+        }
+        loading={monitorLoading}
+        theme={{
+          bg: 'bg-orange-50',
+          border: 'border-orange-200',
+          titleText: 'text-orange-700',
+          valueText: 'text-orange-600',
+          iconBg: 'bg-orange-100',
+          iconText: 'text-orange-700',
+        }}
+      />
+
+      <OverviewKpiCard
+        title="今日执行"
+        icon={<ClockCircleOutlined style={{ fontSize: 18 }} />}
+        value={
+          <>
+            <span className="tabular-nums">{(monitorStats?.todayCount || 0).toLocaleString()}</span>
+            <span className="ml-1 text-2xl sm:text-3xl font-bold opacity-80">次</span>
+          </>
+        }
+        loading={monitorLoading}
+        theme={{
+          bg: 'bg-sky-50',
+          border: 'border-sky-200',
+          titleText: 'text-sky-700',
+          valueText: 'text-sky-600',
+          iconBg: 'bg-sky-100',
+          iconText: 'text-sky-700',
+        }}
+      />
+
+      <OverviewKpiCard
+        title="批次成功率"
+        icon={<CheckCircleOutlined style={{ fontSize: 18 }} />}
+        value={<span className="tabular-nums">{(monitorStats?.successRate || 0).toFixed(0)}%</span>}
+        loading={monitorLoading}
+        theme={{
+          bg: 'bg-emerald-50',
+          border: 'border-emerald-200',
+          titleText: 'text-emerald-700',
+          valueText: 'text-emerald-600',
+          iconBg: 'bg-emerald-100',
+          iconText: 'text-emerald-700',
+        }}
+      />
+
+      <OverviewKpiCard
+        title="广告系列处理统计"
+        icon={<FileTextOutlined style={{ fontSize: 18 }} />}
+        value={<span className="tabular-nums">{(monitorStats?.campaignStats?.totalProcessed || 0).toLocaleString()}</span>}
+        loading={monitorLoading}
+        theme={{
+          bg: 'bg-violet-50',
+          border: 'border-violet-200',
+          titleText: 'text-violet-700',
+          valueText: 'text-violet-600',
+          iconBg: 'bg-violet-100',
+          iconText: 'text-violet-700',
+        }}
+        footer={
+          <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-xs sm:text-sm text-gray-600">处理</span>
+              <span className="text-sm sm:text-base font-semibold text-violet-700 tabular-nums">
+                {(monitorStats?.campaignStats?.totalProcessed || 0).toLocaleString()}
+              </span>
             </div>
-            <div>
-              <Text type="secondary" className="text-xs">更新</Text>
-              <div className="text-green-500 font-semibold">{monitorStats?.campaignStats?.totalUpdated || 0}</div>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-xs sm:text-sm text-gray-600">更新</span>
+              <span className="text-sm sm:text-base font-semibold text-green-700 tabular-nums">
+                {(monitorStats?.campaignStats?.totalUpdated || 0).toLocaleString()}
+              </span>
             </div>
-            <div>
-              <Text type="secondary" className="text-xs">跳过</Text>
-              <div className="text-gray-500 font-semibold">{monitorStats?.campaignStats?.totalSkipped || 0}</div>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-xs sm:text-sm text-gray-600">跳过</span>
+              <span className="text-sm sm:text-base font-semibold text-gray-700 tabular-nums">
+                {(monitorStats?.campaignStats?.totalSkipped || 0).toLocaleString()}
+              </span>
             </div>
-            <div>
-              <Text type="secondary" className="text-xs">失败</Text>
-              <div className="text-red-500 font-semibold">{monitorStats?.campaignStats?.totalErrors || 0}</div>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-xs sm:text-sm text-gray-600">失败</span>
+              <span className="text-sm sm:text-base font-semibold text-red-600 tabular-nums">
+                {(monitorStats?.campaignStats?.totalErrors || 0).toLocaleString()}
+              </span>
             </div>
           </div>
-        </Card>
-      </Col>
-    </Row>
+        }
+      />
+    </div>
   )
 
   return (

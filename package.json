@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start -p 10111",
     "lint": "next lint",
+    "cron:one-click-start": "node scripts/cron-one-click-start.mjs",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
