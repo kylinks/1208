@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { validateMccAndGetAccounts } from '@/lib/google-ads-client'
+import { getGoogleAdsService } from '@/lib/googleAdsService'
 
 // 强制动态渲染，避免构建时静态生成
 export const dynamic = 'force-dynamic'
@@ -29,32 +29,55 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // 调用Google Ads API验证MCC账号（使用服务账号认证）
-    const result = await validateMccAndGetAccounts(mccId)
+    // 统一走 GoogleAdsService：具备 429/5xx 重试 + 排队限流能力
+    const googleAdsService = getGoogleAdsService()
+    const accountsData = await googleAdsService.getMccAccounts(mccId)
 
-    // 返回验证结果
+    // 兼容旧接口返回结构
+    const accounts = accountsData.cidAccounts.map((cid) => ({
+      id: cid.cidId,
+      name: cid.cidName,
+      status: cid.status === 'active' ? 'ENABLED' : 'SUSPENDED',
+      currency: cid.currencyCode || '',
+      timezone: cid.timezone || '',
+    }))
+
     return NextResponse.json({
-      success: result.isValid,
-      hasPermission: result.hasPermission,
-      message: result.message,
-      data: result.accounts
-        ? {
-            totalAccounts: result.accounts.total,
-            activeAccounts: result.accounts.active,
-            inactiveAccounts: result.accounts.inactive,
-            accounts: result.accounts.list,
-          }
-        : null,
+      success: true,
+      hasPermission: true,
+      message: '获取成功',
+      data: {
+        totalAccounts: accounts.length,
+        activeAccounts: accountsData.activeCids,
+        inactiveAccounts: accountsData.suspendedCids,
+        accounts,
+      },
     })
   } catch (error: any) {
     console.error('验证MCC账号失败:', error)
+
+    const msg = error?.message || '验证失败，请稍后重试'
+    const isPermission =
+      msg.includes('权限不足') ||
+      msg.includes('未被授权') ||
+      msg.includes('验证MCC访问权限失败') ||
+      msg.includes('PERMISSION') ||
+      msg.includes('403')
+
+    const isRateOrQuota =
+      msg.includes('429') ||
+      msg.includes('请求频率') ||
+      msg.includes('配额') ||
+      msg.includes('排队') ||
+      msg.includes('RESOURCE_EXHAUSTED')
+
     return NextResponse.json(
       {
         success: false,
-        hasPermission: false,
-        message: error.message || '验证失败，请稍后重试',
+        hasPermission: !isPermission,
+        message: msg,
       },
-      { status: 500 }
+      { status: isRateOrQuota ? 429 : 500 }
     )
   }
 }

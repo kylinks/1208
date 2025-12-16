@@ -8,7 +8,7 @@
  * 2. 数据库缓存 - 如果已有用户添加过该 MCC，复用已有数据
  * 3. 失败缓存 - 短期内同一 MCC 连续失败（尤其 429）直接快速失败，避免打爆配额
  * 4. In-flight 去重 - 同一进程内并发验证同一 MCC 复用同一次请求
- * 5. 全局限流 - 对“调用 Google Ads API”的并发/速率做削峰（同一进程内）
+ * 5. 全局限流 - 由 GoogleAdsService 统一处理（排队限流 + 退避重试）
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -51,58 +51,6 @@ const DB_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 小时
 
 // 同一进程内的并发去重：相同 mccId 同时验证只打一次 Google Ads API
 const inFlightVerify = new Map<string, Promise<any>>();
-
-// ============== 轻量全局限流（同一进程内） ==============
-type TokenBucket = { tokens: number; lastRefillAt: number };
-
-function getEnvInt(key: string, fallback: number) {
-  const raw = process.env[key];
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-const LIMIT_RPS = getEnvInt('MCC_VERIFY_GOOGLEADS_RPS', 1); // 每秒补充 token
-const LIMIT_BURST = getEnvInt('MCC_VERIFY_GOOGLEADS_BURST', 3); // 最大突发
-const LIMIT_MAX_WAIT_MS = getEnvInt('MCC_VERIFY_GOOGLEADS_MAX_WAIT_MS', 30_000); // 最长排队等待
-
-function getBucket(): TokenBucket {
-  const g = globalThis as any;
-  if (!g.__mccVerifyTokenBucket) {
-    g.__mccVerifyTokenBucket = { tokens: LIMIT_BURST, lastRefillAt: Date.now() } satisfies TokenBucket;
-  }
-  return g.__mccVerifyTokenBucket as TokenBucket;
-}
-
-function delay(ms: number) {
-  return new Promise<void>(resolve => setTimeout(resolve, ms));
-}
-
-async function acquireGoogleAdsToken(): Promise<boolean> {
-  const start = Date.now();
-  const bucket = getBucket();
-  while (Date.now() - start < LIMIT_MAX_WAIT_MS) {
-    const now = Date.now();
-    const elapsedMs = Math.max(0, now - bucket.lastRefillAt);
-    if (elapsedMs > 0) {
-      const refill = (elapsedMs / 1000) * LIMIT_RPS;
-      if (refill > 0) {
-        bucket.tokens = Math.min(LIMIT_BURST, bucket.tokens + refill);
-        bucket.lastRefillAt = now;
-      }
-    }
-
-    if (bucket.tokens >= 1) {
-      bucket.tokens -= 1;
-      return true;
-    }
-
-    // 稍作等待再试（避免忙等）
-    await delay(150);
-  }
-
-  return false;
-}
 
 /**
  * 清理过期缓存
@@ -257,12 +205,6 @@ export async function POST(request: NextRequest) {
 
     const inFlightPromise = (async () => {
       console.log(`🔄 MCC ${mccId} 缓存未命中，准备调用 Google Ads API...`);
-
-      // 全局限流：避免瞬时并发把配额打爆
-      const ok = await acquireGoogleAdsToken();
-      if (!ok) {
-        throw new Error('验证请求过多，请稍后再试（系统正在排队处理）');
-      }
 
       const googleAdsService = getGoogleAdsService();
       return await googleAdsService.verifyMccAccount(mccId);

@@ -1,6 +1,6 @@
 'use client'
 
-import { Layout, Menu, theme, message, Modal, Tooltip } from 'antd'
+import { Layout, Menu, theme, message, Tooltip } from 'antd'
 import { usePathname, useRouter } from 'next/navigation'
 import { useSession, signOut } from 'next-auth/react'
 import { useEffect, useState } from 'react'
@@ -14,7 +14,6 @@ import {
   FileTextOutlined,
   UserOutlined,
   LogoutOutlined,
-  ExclamationCircleOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   CopyOutlined,
@@ -40,7 +39,7 @@ function ConsoleLayoutInner({
   const [collapsed, setCollapsed] = useState(false)
   
   // 获取监控状态
-  const { isMonitorRunning, stopMonitor } = useMonitor()
+  const { stopMonitor } = useMonitor()
 
   const role = session?.user?.role === 'admin' ? 'admin' : 'employee'
   const defaultConsolePath = role === 'admin' ? '/console/proxy' : '/console'
@@ -105,7 +104,7 @@ function ConsoleLayoutInner({
   const doLogout = async () => {
     try {
       // 退出前先停止监控，清除 localStorage 状态
-      stopMonitor()
+      stopMonitor(true)
       await signOut({ callbackUrl: '/login' })
       message.success('已退出登录')
     } catch (error) {
@@ -115,29 +114,8 @@ function ConsoleLayoutInner({
 
   // 处理退出登录点击
   const handleLogout = () => {
-    if (isMonitorRunning) {
-      // 如果监控正在运行，弹出确认对话框
-      Modal.confirm({
-        title: '监控正在运行中',
-        icon: <ExclamationCircleOutlined />,
-        content: (
-          <div>
-            <p>退出登录后，监控任务将会停止。</p>
-            <p className="text-gray-500 text-sm mt-2">
-              提示：监控任务依赖浏览器运行，退出登录或关闭页面后将无法继续执行。
-              重新登录后需要手动启动监控。
-            </p>
-          </div>
-        ),
-        okText: '确认退出',
-        cancelText: '取消',
-        okButtonProps: { danger: true },
-        onOk: doLogout,
-      })
-    } else {
-      // 监控未运行，直接退出
-      doLogout()
-    }
+    // 监控已迁移到服务器定时任务(crontab)，退出登录不应弹“浏览器依赖”的误导提示
+    doLogout()
   }
 
   const displayName = session.user?.name || '未命名用户'
@@ -174,7 +152,7 @@ function ConsoleLayoutInner({
         <div className="flex flex-col h-full">
           {/* 品牌区 */}
           <div className="flex items-center justify-center h-16 text-white text-lg font-bold">
-            {collapsed ? '换链' : '自动换链接系统'}
+            {collapsed ? 'Ky' : 'KyAdsLink'}
           </div>
 
           {/* 用户信息区（对齐截图：头像/姓名/邮箱） */}
@@ -240,11 +218,8 @@ function ConsoleLayoutInner({
         <Header style={{ padding: '0 24px', background: colorBgContainer }}>
           <div className="flex items-center justify-between h-full">
             <h1 className="text-xl font-semibold m-0">
-              KyLinks自动换链接系统
+              KyAdsLink自动换链接系统
             </h1>
-            <div className="text-xs text-gray-500">
-              {session.user?.role === 'admin' ? '管理员' : '员工'}
-            </div>
           </div>
         </Header>
         <Content style={{ margin: '24px 16px 0' }}>

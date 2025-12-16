@@ -7,7 +7,7 @@
 创建 `.env` 文件（如果还没有）：
 
 ```bash
-cp .env.example .env
+cp env.example .env
 ```
 
 确保包含以下配置：

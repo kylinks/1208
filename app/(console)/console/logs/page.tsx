@@ -404,7 +404,7 @@ export default function LogsManagement() {
         value={
           <>
             <span className="tabular-nums">{(monitorStats?.totalCount || 0).toLocaleString()}</span>
-            <span className="ml-1 text-2xl sm:text-3xl font-bold opacity-80">次</span>
+            <span className="ml-1 text-lg sm:text-xl font-semibold opacity-75">次</span>
           </>
         }
         loading={monitorLoading}
@@ -424,7 +424,7 @@ export default function LogsManagement() {
         value={
           <>
             <span className="tabular-nums">{(monitorStats?.todayCount || 0).toLocaleString()}</span>
-            <span className="ml-1 text-2xl sm:text-3xl font-bold opacity-80">次</span>
+            <span className="ml-1 text-lg sm:text-xl font-semibold opacity-75">次</span>
           </>
         }
         loading={monitorLoading}
@@ -666,6 +666,13 @@ export default function LogsManagement() {
                           <Tag color={detail.googleAdsUpdated ? 'success' : 'warning'} className="mt-1">
                             {detail.googleAdsUpdated ? 'Google Ads已更新' : 'Google Ads更新失败'}
                           </Tag>
+                        )}
+                        {detail.googleAdsUpdated === false && (
+                          <Tooltip title={detail.googleAdsError || '未返回错误信息'}>
+                            <div className="text-xs text-red-500 mt-1 truncate max-w-64">
+                              原因: {detail.googleAdsError || '未返回错误信息'}
+                            </div>
+                          </Tooltip>
                         )}
                       </div>
                     </div>

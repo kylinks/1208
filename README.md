@@ -81,13 +81,15 @@ npm install
 
 ```bash
 # 复制环境变量模板
-cp .env.example .env
+cp env.example .env
 
 # 编辑 .env 文件，配置以下关键信息：
 # - DATABASE_URL: MySQL数据库连接
 # - NEXTAUTH_SECRET: NextAuth密钥
 # - GOOGLE_ADS_DEVELOPER_TOKEN: Google Ads开发者令牌
-# - GOOGLE_CLIENT_ID/SECRET: Google OAuth凭据
+# - GOOGLE_SERVICE_ACCOUNT_KEY_PATH: Google 服务账号密钥路径
+# - （可选）GOOGLEADS_RPS/BURST/MAX_WAIT_MS: Google Ads 请求排队限流参数
+# - （可选）GOOGLEADS_CID_CONCURRENCY / ONECLICK_GOOGLEADS_MCC_CONCURRENCY: 同步/监控削峰参数
 ```
 
 ### 3. 初始化数据库
@@ -132,7 +134,7 @@ npm run db:studio
 │   └── seed.ts           # 数据库种子文件
 ├── lib/                   # 工具库
 │   └── prisma.ts         # Prisma Client + 软删除中间件
-├── .env.example          # 环境变量模板
+├── env.example           # 环境变量模板（由于忽略规则，未使用 .env.example 命名）
 ├── package.json          # 项目依赖配置
 ├── PRD.md               # 产品需求文档
 └── README.md            # 项目说明文档（本文件）

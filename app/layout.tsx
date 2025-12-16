@@ -5,7 +5,7 @@ import AuthSessionProvider from '@/components/providers/session-provider'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'KyLinks自动换链接系统',
+  title: 'KyAdsLink自动换链接系统',
   description: '自动监控Google Ads点击并更新联盟链接',
 }
 

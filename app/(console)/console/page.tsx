@@ -8,8 +8,6 @@ import {
   SyncOutlined,
   GlobalOutlined,
   LinkOutlined,
-  PauseCircleOutlined,
-  PlayCircleOutlined,
   ThunderboltOutlined,
   CheckCircleOutlined,
 } from '@ant-design/icons'
@@ -88,13 +86,10 @@ export default function ConsoleDashboard() {
   })
   // 使用全局监控状态
   const {
-    isMonitorRunning,
     oneClickLoading,
-    runCount,
-    countdown,
     lastExecutionTime,
     startMonitor,
-    stopMonitor,
+    monitorInterval,
   } = useMonitor()
 
   // 获取仪表盘统计数据
@@ -155,13 +150,6 @@ export default function ConsoleDashboard() {
   // 处理表格分页变化
   const handleTableChange = (paginationConfig: any) => {
     fetchMonitoringData(paginationConfig.current, paginationConfig.pageSize)
-  }
-
-  // 格式化倒计时
-  const formatCountdown = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
   // 格式化时间
@@ -351,7 +339,9 @@ export default function ConsoleDashboard() {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold mb-4">仪表盘概览</h2>
-        <p className="text-gray-600 mb-6">实时监控广告系列状态和链接更换情况</p>
+        <p className="text-gray-600 mb-6">
+          查看广告系列状态和链接更换情况（数据由服务器定时任务每 {monitorInterval} 分钟更新）
+        </p>
       </div>
 
       {/* 统计卡片 */}
@@ -423,39 +413,20 @@ export default function ConsoleDashboard() {
           <Space>
             <GlobalOutlined />
             <span>广告系列监控列表</span>
-            {isMonitorRunning && (
-              <>
-                <Badge status="processing" />
-                <span className="text-green-600 text-sm">
-                  监控运行中 | 第 {runCount} 轮 | 下次执行: {formatCountdown(countdown)}
-                </span>
-              </>
-            )}
+            {oneClickLoading && <Badge status="processing" />}
           </Space>
         }
         extra={
           <Space>
-            {!isMonitorRunning ? (
-              <Button
-                type="primary"
-                icon={oneClickLoading ? <SyncOutlined spin /> : <PlayCircleOutlined />}
-                onClick={startMonitor}
-                loading={oneClickLoading}
-                style={{ background: '#52c41a', borderColor: '#52c41a' }}
-              >
-                一键启动
-              </Button>
-            ) : (
-              <Button
-                type="primary"
-                danger
-                icon={<PauseCircleOutlined />}
-                onClick={stopMonitor}
-                disabled={oneClickLoading}
-              >
-                停止监控
-              </Button>
-            )}
+            <Button
+              type="primary"
+              icon={oneClickLoading ? <SyncOutlined spin /> : <ThunderboltOutlined />}
+              onClick={startMonitor}
+              loading={oneClickLoading}
+              style={{ background: '#52c41a', borderColor: '#52c41a' }}
+            >
+              立即执行一次
+            </Button>
           </Space>
         }
       >

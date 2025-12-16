@@ -106,14 +106,20 @@ async function clickWithProxy(
     // 获取实际代理IP
     let actualProxyIp = ''
     try {
-      const ipResponse = await undiciFetch('http://ip-api.com/json', {
+      // 优先使用 https 的 IP 查询服务，避免云环境拦截 http 出站请求
+      const ipResponse = await undiciFetch('https://checkip.amazonaws.com', {
         method: 'GET',
+        redirect: 'follow',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; ProxyIpCheck/1.0)',
+          'Accept': '*/*',
+          'Cache-Control': 'no-cache',
+        },
         dispatcher: proxyAgent,
         signal: AbortSignal.timeout(8000)
       })
       if (ipResponse.ok) {
-        const ipData = await ipResponse.json() as any
-        actualProxyIp = ipData.query || ''
+        actualProxyIp = (await ipResponse.text()).trim()
       }
     } catch (e) {
       console.warn('获取代理IP失败，继续执行点击')

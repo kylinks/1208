@@ -30,7 +30,7 @@ export function OverviewKpiCard({
     <div
       className={[
         'rounded-2xl border shadow-sm transition-shadow hover:shadow-md',
-        'p-6 sm:p-7',
+        'p-5 sm:p-6',
         theme.bg,
         theme.border,
       ].join(' ')}
@@ -38,23 +38,28 @@ export function OverviewKpiCard({
       <div className="flex items-center gap-2">
         <div
           className={[
-            'h-11 w-11 rounded-2xl flex items-center justify-center',
+            'h-10 w-10 rounded-xl flex items-center justify-center',
             theme.iconBg,
             theme.iconText,
           ].join(' ')}
         >
           {icon}
         </div>
-        <div className={['text-lg font-bold', theme.titleText].join(' ')}>{title}</div>
+        <div className={['text-sm sm:text-base font-semibold', theme.titleText].join(' ')}>{title}</div>
       </div>
 
-      <div className="mt-6">
+      <div className="mt-4">
         {loading ? (
           <div className="animate-pulse">
-            <div className="h-14 w-40 rounded bg-black/10" />
+            <div className="h-10 sm:h-12 w-40 rounded bg-black/10" />
           </div>
         ) : (
-          <div className={['text-6xl sm:text-7xl font-extrabold leading-none tracking-tight', theme.valueText].join(' ')}>
+          <div
+            className={[
+              'text-3xl sm:text-4xl font-extrabold leading-none tracking-tight',
+              theme.valueText,
+            ].join(' ')}
+          >
             {value}
           </div>
         )}

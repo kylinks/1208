@@ -26,6 +26,23 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL="你的服务账号@项目ID.iam.gserviceaccount.co
 
 # 服务账号私钥文件路径（必填）
 GOOGLE_SERVICE_ACCOUNT_KEY_PATH="./config/service-account-key.json"
+
+# ============================================
+# Google Ads 限速/并发（推荐：单进程部署优先稳）
+# ============================================
+# 说明：项目会对所有 Google Ads 请求统一做“排队限流 + 429/5xx 退避重试”。
+# 你可以通过以下参数调节“稳定性 vs 吞吐”。
+
+# 全局（同进程）令牌桶：所有 Google Ads 请求统一排队限流
+GOOGLEADS_RPS=1
+GOOGLEADS_BURST=2
+GOOGLEADS_MAX_WAIT_MS=120000
+
+# 同步广告系列时：每个 MCC 下并发处理 CID 的上限（避免瞬时洪峰触发 429）
+GOOGLEADS_CID_CONCURRENCY=2
+
+# 一键启动/监控：并发拉取点击数的 MCC 数量上限（更稳建议 1）
+ONECLICK_GOOGLEADS_MCC_CONCURRENCY=1
 ```
 
 ## 📝 配置步骤

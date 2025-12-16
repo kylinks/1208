@@ -240,7 +240,7 @@ npm install
 ### 2. 配置环境变量
 ```bash
 # 复制环境变量模板
-cp .env.example .env
+cp env.example .env
 
 # 编辑 .env 文件，配置数据库连接
 # DATABASE_URL="mysql://root:password@localhost:3306/google_ads_system"

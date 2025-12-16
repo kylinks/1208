@@ -43,7 +43,7 @@ function LoginForm() {
       <Card className="w-full max-w-md shadow-2xl">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-gray-800 mb-2">
-            Google Ads 自动换链系统
+            KyAdsLink自动换链接系统
           </h1>
           <p className="text-gray-600">请登录以继续访问控制台</p>
         </div>
@@ -95,13 +95,6 @@ function LoginForm() {
             </Button>
           </Form.Item>
         </Form>
-
-        <div className="text-center text-sm text-gray-500 mt-4">
-          <p>默认管理员账号</p>
-          <p className="mt-1">
-            邮箱: admin@example.com | 密码: admin123456
-          </p>
-        </div>
       </Card>
     </div>
   )

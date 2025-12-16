@@ -69,6 +69,57 @@ class GoogleAdsService {
   private maxRetries: number = 5; // 增加到 5 次
   private baseRetryDelayMs: number = 10000; // 初始等待 10 秒（Google API 配额错误需要更长等待）
 
+  // ============== 全局限流（同一进程内，排队等待） ==============
+  // 说明：Google Ads API 有较严格的频控/配额，且本项目在 sync/monitor 场景会产生并发。
+  // 这里在 Service 内统一做“令牌桶”限流 + 排队等待，确保所有调用链一致。
+  private limitRps: number = 1; // 每秒补充 token
+  private limitBurst: number = 3; // 最大突发
+  private limitMaxWaitMs: number = 60_000; // 最长排队等待（用户选择：429 时可排队更稳）
+
+  private getEnvInt(key: string, fallback: number) {
+    const raw = process.env[key];
+    if (!raw) return fallback;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  private getTokenBucket(): { tokens: number; lastRefillAt: number } {
+    const g = globalThis as any;
+    if (!g.__googleAdsTokenBucket) {
+      g.__googleAdsTokenBucket = { tokens: this.limitBurst, lastRefillAt: Date.now() } as {
+        tokens: number;
+        lastRefillAt: number;
+      };
+    }
+    return g.__googleAdsTokenBucket;
+  }
+
+  private async acquireToken(): Promise<boolean> {
+    const start = Date.now();
+    const bucket = this.getTokenBucket();
+
+    while (Date.now() - start < this.limitMaxWaitMs) {
+      const now = Date.now();
+      const elapsedMs = Math.max(0, now - bucket.lastRefillAt);
+      if (elapsedMs > 0) {
+        const refill = (elapsedMs / 1000) * this.limitRps;
+        if (refill > 0) {
+          bucket.tokens = Math.min(this.limitBurst, bucket.tokens + refill);
+          bucket.lastRefillAt = now;
+        }
+      }
+
+      if (bucket.tokens >= 1) {
+        bucket.tokens -= 1;
+        return true;
+      }
+
+      await this.delay(150);
+    }
+
+    return false;
+  }
+
   constructor() {
     this.developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '';
     this.serviceAccountKeyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || '';
@@ -79,6 +130,14 @@ class GoogleAdsService {
     if (!this.serviceAccountKeyPath) {
       throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY_PATH 环境变量未配置');
     }
+
+    // 统一限流配置（可通过 env 覆盖）
+    // - GOOGLEADS_RPS: 每秒 token 补充数
+    // - GOOGLEADS_BURST: 突发 token 上限
+    // - GOOGLEADS_MAX_WAIT_MS: 排队最长等待
+    this.limitRps = this.getEnvInt('GOOGLEADS_RPS', this.limitRps);
+    this.limitBurst = this.getEnvInt('GOOGLEADS_BURST', this.limitBurst);
+    this.limitMaxWaitMs = this.getEnvInt('GOOGLEADS_MAX_WAIT_MS', this.limitMaxWaitMs);
   }
 
   /**
@@ -101,14 +160,23 @@ class GoogleAdsService {
     options: RequestInit,
     retryCount: number = 0
   ): Promise<Response> {
+    // 全局限流：先排队拿 token，避免瞬时并发把配额打爆
+    const ok = await this.acquireToken();
+    if (!ok) {
+      // 排队超时：直接抛错，让上层给出“排队中/稍后再试”的语义
+      throw new Error('Google Ads 请求过多，排队超时，请稍后再试');
+    }
+
     const response = await fetch(url, options);
 
     // 需要重试的状态码：429 配额/限流、5xx 临时不可用
     const shouldRetryStatus =
       response.status === 429 ||
       response.status === 500 ||
+      response.status === 502 ||
       response.status === 503 ||
-      response.status === 504;
+      response.status === 504 ||
+      response.status === 408;
 
     // 如果遇到可重试错误且还有重试次数
     if (shouldRetryStatus && retryCount < this.maxRetries) {
@@ -436,7 +504,7 @@ class GoogleAdsService {
         cidId: formattedCidId,
       });
 
-      const response = await fetch(apiUrl, {
+      const response = await this.fetchWithRetry(apiUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.accessToken}`,
@@ -517,7 +585,7 @@ class GoogleAdsService {
         WHERE campaign.status = 'ENABLED'
       `;
 
-      const campaignResponse = await fetch(apiUrl, {
+      const campaignResponse = await this.fetchWithRetry(apiUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.accessToken}`,
@@ -566,7 +634,7 @@ class GoogleAdsService {
 
       // 【优化】并行执行两个批量查询
       const [adResponse, geoResponse] = await Promise.all([
-        fetch(apiUrl, {
+        this.fetchWithRetry(apiUrl, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${this.accessToken}`,
@@ -576,7 +644,7 @@ class GoogleAdsService {
           },
           body: JSON.stringify({ query: adQuery }),
         }),
-        fetch(apiUrl, {
+        this.fetchWithRetry(apiUrl, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${this.accessToken}`,
@@ -654,19 +722,44 @@ class GoogleAdsService {
     
     console.log(`📊 找到 ${activeCids.length} 个有效 CID 账户，开始并行获取广告系列...`);
 
-    // 【性能优化】并行处理所有 CID，而不是串行遍历
-    // 使用 Promise.allSettled 确保即使某个 CID 失败也不影响其他
-    const results = await Promise.allSettled(
-      activeCids.map(async (cid) => {
-        try {
-          const campaigns = await this.getSimpleCampaignsForCid(mccId, cid.cidId, cid.cidName);
-          console.log(`✅ CID ${cid.cidId} (${cid.cidName}): 获取到 ${campaigns.length} 个广告系列`);
-          return campaigns;
-        } catch (error) {
-          console.error(`❌ CID ${cid.cidId} 获取广告系列失败:`, error);
-          return [];
+    // 【稳定性优化】限制 CID 并发，避免瞬时洪峰触发 429
+    const cidConcurrency = this.getEnvInt('GOOGLEADS_CID_CONCURRENCY', 3);
+
+    const runWithConcurrencyLimit = async <T, R>(
+      items: T[],
+      limit: number,
+      fn: (item: T, index: number) => Promise<R>
+    ): Promise<PromiseSettledResult<R>[]> => {
+      const results: PromiseSettledResult<R>[] = new Array(items.length);
+      let currentIndex = 0;
+
+      const worker = async () => {
+        while (currentIndex < items.length) {
+          const i = currentIndex++;
+          try {
+            const value = await fn(items[i], i);
+            results[i] = { status: 'fulfilled', value } as PromiseFulfilledResult<R>;
+          } catch (reason) {
+            results[i] = { status: 'rejected', reason } as PromiseRejectedResult;
+          }
         }
-      })
+      };
+
+      const workers = Array(Math.min(limit, items.length))
+        .fill(null)
+        .map(() => worker());
+      await Promise.all(workers);
+      return results;
+    };
+
+    const results = await runWithConcurrencyLimit(
+      activeCids,
+      Math.max(1, cidConcurrency),
+      async (cid) => {
+        const campaigns = await this.getSimpleCampaignsForCid(mccId, cid.cidId, cid.cidName);
+        console.log(`✅ CID ${cid.cidId} (${cid.cidName}): 获取到 ${campaigns.length} 个广告系列`);
+        return campaigns;
+      }
     );
 
     // 合并所有成功的结果
@@ -674,6 +767,9 @@ class GoogleAdsService {
     for (const result of results) {
       if (result.status === 'fulfilled') {
         allCampaigns.push(...result.value);
+      } else {
+        const reason = (result as any).reason;
+        console.error(`❌ CID 获取广告系列失败:`, reason);
       }
     }
 
@@ -767,7 +863,7 @@ class GoogleAdsService {
         campaignIds: campaignIds.length,
       });
 
-      const response = await fetch(apiUrl, {
+      const response = await this.fetchWithRetry(apiUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.accessToken}`,
@@ -840,7 +936,7 @@ class GoogleAdsService {
       try {
         const apiUrl = `https://googleads.googleapis.com/${this.apiVersion}/customers/${formattedCidId}/googleAds:search`;
         
-        const response = await fetch(apiUrl, {
+        const response = await this.fetchWithRetry(apiUrl, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${this.accessToken}`,
@@ -922,7 +1018,8 @@ class GoogleAdsService {
         finalUrlSuffix: finalUrlSuffix.substring(0, 50) + '...',
       });
 
-      const response = await fetch(apiUrl, {
+      // 使用带重试+排队的 fetch，429 时会退避重试（用户选择：更稳地等待）
+      const response = await this.fetchWithRetry(apiUrl, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.accessToken}`,
@@ -935,18 +1032,53 @@ class GoogleAdsService {
 
       if (!response.ok) {
         const responseText = await response.text();
+        const requestId =
+          response.headers.get('request-id') ||
+          response.headers.get('x-request-id') ||
+          undefined;
         console.error('❌ 更新广告系列后缀失败:', {
           status: response.status,
+          requestId,
           response: responseText.substring(0, 500),
         });
         
         // 解析错误信息
-        let errorMsg = '更新失败';
+        let errorMsg = `更新失败(HTTP ${response.status})`;
         try {
           const errorData = JSON.parse(responseText);
-          errorMsg = errorData.error?.message || errorData.message || responseText;
+          const apiError = errorData?.error || errorData;
+          const code = apiError?.code;
+          const statusText = apiError?.status;
+          const message = apiError?.message;
+          const details = apiError?.details;
+
+          const parts: string[] = [];
+          parts.push(`HTTP ${response.status}`);
+          if (typeof code === 'number' || typeof code === 'string') parts.push(`code=${code}`);
+          if (typeof statusText === 'string') parts.push(`status=${statusText}`);
+          if (requestId) parts.push(`requestId=${requestId}`);
+          if (typeof message === 'string' && message.trim()) parts.push(message.trim());
+
+          // Google Ads API 经常把更细的原因放在 details 里；这里保留一段可读的截断信息。
+          let detailsStr = '';
+          if (details !== undefined) {
+            try {
+              detailsStr = JSON.stringify(details);
+            } catch {
+              detailsStr = String(details);
+            }
+          }
+          if (detailsStr) {
+            const truncated = detailsStr.length > 400 ? detailsStr.substring(0, 400) + '...' : detailsStr;
+            parts.push(`details=${truncated}`);
+          }
+
+          errorMsg = parts.join(' | ');
         } catch {
-          errorMsg = responseText.substring(0, 200);
+          const safeText = responseText.substring(0, 200);
+          errorMsg = requestId
+            ? `HTTP ${response.status} | requestId=${requestId} | ${safeText}`
+            : `HTTP ${response.status} | ${safeText}`;
         }
         
         return { success: false, error: errorMsg };

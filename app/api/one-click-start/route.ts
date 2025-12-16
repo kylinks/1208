@@ -31,6 +31,7 @@ import { ProxyAgent, fetch as undiciFetch } from 'undici'
 
 // ============== 并发控制配置 ==============
 const CONCURRENCY_LIMIT = 10 // 同时处理的广告系列数量
+const GOOGLEADS_MCC_CONCURRENCY_LIMIT = Number.parseInt(process.env.ONECLICK_GOOGLEADS_MCC_CONCURRENCY || '2', 10) || 2 // 同时拉取点击数的 MCC 数量（防止洪峰触发 429）
 const IP_CHECK_TIMEOUT = 8000 // IP检查超时时间（毫秒）
 const REDIRECT_TIMEOUT = 15000 // 重定向超时时间（毫秒）
 const PROXY_CONNECT_TIMEOUT = 10000 // 代理连接超时时间（毫秒）
@@ -126,23 +127,26 @@ export async function runOneClickStartForUser(userId: string) {
 
   // 并行获取各MCC的今日点击数
   const clicksMap = new Map<string, number>()
-  const mccPromises = Array.from(mccGroups.entries()).map(async ([mccId, mccCampaigns]) => {
-    const campaignInfos = mccCampaigns.map(c => ({
-      cidId: c.cidAccount.cid,
-      campaignId: c.campaignId,
-    }))
+  const mccEntries = Array.from(mccGroups.entries())
+  await runWithConcurrencyLimit<[string, typeof campaigns], void>(
+    mccEntries,
+    Math.max(1, GOOGLEADS_MCC_CONCURRENCY_LIMIT),
+    async ([mccId, mccCampaigns]) => {
+      const campaignInfos = mccCampaigns.map(c => ({
+        cidId: c.cidAccount.cid,
+        campaignId: c.campaignId,
+      }))
 
-    try {
-      const batchClicks = await googleAdsService.getBatchCampaignClicks(mccId, campaignInfos)
-      for (const [campaignId, clicks] of batchClicks) {
-        clicksMap.set(campaignId, clicks)
+      try {
+        const batchClicks = await googleAdsService.getBatchCampaignClicks(mccId, campaignInfos)
+        for (const [campaignId, clicks] of batchClicks) {
+          clicksMap.set(campaignId, clicks)
+        }
+      } catch (error) {
+        console.error(`获取 MCC ${mccId} 点击数失败:`, error)
       }
-    } catch (error) {
-      console.error(`获取 MCC ${mccId} 点击数失败:`, error)
     }
-  })
-
-  await Promise.all(mccPromises)
+  )
   console.log(`📊 获取点击数完成，耗时 ${Date.now() - startTime}ms userId=${userId}`)
 
   // 并行处理广告系列（使用并发控制）
@@ -447,50 +451,81 @@ async function fetchProxyIpWithRetry(
   proxyAgent: InstanceType<typeof ProxyAgent>,
   retryCount: number = 0
 ): Promise<{ success: boolean; ip?: string; error?: string }> {
-  const ipCheckServices = [
-    { url: 'http://ip-api.com/json', parser: (data: any) => data.query },
-    { url: 'http://httpbin.org/ip', parser: (data: any) => data.origin },
-    { url: 'http://api.ipify.org?format=json', parser: (data: any) => data.ip },
+  // 注意：很多云环境会直接拦截/降级 http 出站请求，因此这里优先使用 https 的服务。
+  // 同时保留多个不同厂商的服务，避免单点故障或被代理/机房封锁。
+  const ipCheckServices: Array<{
+    url: string
+    type: 'json' | 'text'
+    parser: (data: any) => string | undefined
+  }> = [
+    { url: 'https://checkip.amazonaws.com', type: 'text', parser: (text: string) => text?.trim() },
+    { url: 'https://ifconfig.me/ip', type: 'text', parser: (text: string) => text?.trim() },
+    { url: 'https://icanhazip.com', type: 'text', parser: (text: string) => text?.trim() },
+    { url: 'https://api.ipify.org?format=json', type: 'json', parser: (data: any) => data?.ip },
+    { url: 'https://httpbin.org/ip', type: 'json', parser: (data: any) => (data?.origin ? String(data.origin).split(',')[0].trim() : undefined) },
+    { url: 'https://api.myip.com', type: 'json', parser: (data: any) => data?.ip },
+    // 备用（仅 http，部分环境可能被拦截；放到最后）
+    { url: 'http://ip-api.com/json', type: 'json', parser: (data: any) => data?.query },
   ]
+
+  const failures: string[] = []
 
   for (const service of ipCheckServices) {
     try {
       const ipResponse = await undiciFetch(service.url, {
         method: 'GET',
+        redirect: 'follow',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; ProxyIpCheck/1.0)',
+          'Accept': '*/*',
+          'Cache-Control': 'no-cache',
+        },
         dispatcher: proxyAgent,
-        signal: AbortSignal.timeout(IP_CHECK_TIMEOUT)
+        signal: AbortSignal.timeout(IP_CHECK_TIMEOUT),
       })
-      if (ipResponse.ok) {
-        const ipData = await ipResponse.json() as any
-        const ip = service.parser(ipData)
-        if (ip) {
-          return { success: true, ip }
-        }
+
+      if (!ipResponse.ok) {
+        failures.push(`${service.url} -> HTTP ${ipResponse.status}`)
+        continue
       }
+
+      const raw = service.type === 'json' ? await ipResponse.json() : await ipResponse.text()
+      const ip = service.parser(raw)
+      if (ip) {
+        return { success: true, ip }
+      }
+
+      failures.push(`${service.url} -> 无法解析IP`)
     } catch (e: any) {
-      const errorMsg = e.cause?.message || e.message || '未知错误'
-      console.warn(`IP查询服务 ${service.url} 失败:`, errorMsg)
-      
+      const errorMsg = e?.cause?.message || e?.message || '未知错误'
+      const errorCode = e?.cause?.code || e?.code
+      const reason = errorCode ? `${errorCode}: ${errorMsg}` : errorMsg
+      console.warn(`IP查询服务 ${service.url} 失败:`, reason)
+      failures.push(`${service.url} -> ${reason}`)
+
       // 判断是否需要重试（连接失败、超时等）
-      const isRetryableError = 
-        errorMsg.includes('fetch failed') ||
-        errorMsg.includes('ETIMEDOUT') ||
-        errorMsg.includes('ECONNREFUSED') ||
-        errorMsg.includes('ECONNRESET') ||
-        errorMsg.includes('timeout')
-      
+      const isRetryableError =
+        String(reason).includes('fetch failed') ||
+        String(reason).includes('ETIMEDOUT') ||
+        String(reason).includes('ECONNREFUSED') ||
+        String(reason).includes('ECONNRESET') ||
+        String(reason).includes('timeout') ||
+        String(reason).includes('UND_ERR_CONNECT_TIMEOUT') ||
+        String(reason).includes('UND_ERR_SOCKET')
+
       if (isRetryableError && retryCount < PROXY_RETRY_COUNT) {
         const delayMs = PROXY_RETRY_DELAY_BASE * Math.pow(2, retryCount)
         console.log(`⏳ 代理连接失败，${delayMs / 1000} 秒后重试... (第 ${retryCount + 1}/${PROXY_RETRY_COUNT} 次)`)
         await delay(delayMs)
         return fetchProxyIpWithRetry(proxyAgent, retryCount + 1)
       }
-      
+
       continue
     }
   }
 
-  return { success: false, error: '所有IP查询服务均失败' }
+  const details = failures.length ? `: ${failures.slice(0, 6).join('; ')}${failures.length > 6 ? ' ...' : ''}` : ''
+  return { success: false, error: `所有IP查询服务均失败${details}` }
 }
 
 /**
@@ -920,7 +955,9 @@ async function processSingleCampaign(
     ])
 
     // 使用 Google Ads API 更新广告系列的最终到达网址后缀
-    let googleAdsUpdateSuccess = false
+    // 注意：只有在确实提取到 suffix 且发起了更新请求时，才写入 googleAdsUpdated。
+    // 否则保持 undefined，前端会显示为“未尝试更新”，避免误报“更新失败”。
+    let googleAdsUpdateSuccess: boolean | undefined
     let googleAdsError: string | undefined
     
     if (newLinkSuffix) {

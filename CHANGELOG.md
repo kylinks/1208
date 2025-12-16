@@ -18,7 +18,7 @@
 
 ### 📝 文件变更
 
-- ✅ **创建 `.env`**：基于 `.env.example` 创建环境变量文件
+- ✅ **创建 `.env`**：基于 `env.example` 创建环境变量文件（由于忽略规则，未使用 `.env.example` 命名）
   - 配置主数据库连接：`DATABASE_URL`
   - 配置影子数据库连接：`SHADOW_DATABASE_URL`
   
